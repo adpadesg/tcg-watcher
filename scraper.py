@@ -695,6 +695,7 @@ def articulos_shopify(fuente: dict) -> Tuple[List[dict], bool, int]:
 
 LIMITE_TELEGRAM = 3900   # el máximo real son 4096; se deja margen
 PAUSA_ENTRE_MENSAJES = 1.1   # segundos: límite de Telegram hacia un mismo chat
+SILENCIO = False   # con --sin-avisos: se registra lo que se enviaría, sin enviarlo
 
 
 def bandera(idioma: Optional[str]) -> str:
@@ -719,6 +720,10 @@ def enviar_mensaje(telegram: dict, texto: str, chat_id: Optional[str] = None) ->
     El corte se hace siempre entre líneas: partir por la mitad dejaría una
     etiqueta <a> abierta y Telegram rechazaría el mensaje entero.
     """
+    if SILENCIO:
+        logging.info("[sin avisos] no se envía:\n%s", texto[:400])
+        return True
+
     destino = chat_id or telegram["chat_id"]
     api = f"https://api.telegram.org/bot{telegram['bot_token']}/sendMessage"
 
@@ -1481,9 +1486,15 @@ def main():
                         help="Con --informe, lo envía sea la hora que sea.")
     parser.add_argument("--comandos", action="store_true",
                         help="Atiende los comandos de Telegram pendientes.")
+    parser.add_argument("--sin-avisos", action="store_true", dest="sin_avisos",
+                        help="No envía nada a Telegram: solo registra lo que enviaría. "
+                             "Úsalo para probar en local sin duplicar los avisos de la nube.")
     parser.add_argument("--menu", action="store_true",
                         help="Publica el menú de comandos que Telegram sugiere al escribir '/'.")
     args = parser.parse_args()
+
+    if args.sin_avisos:
+        globals()["SILENCIO"] = True
 
     if args.check:
         selectores = DEFAULT_SELECTORS

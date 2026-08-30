@@ -237,6 +237,13 @@ disponibilidad, que es de donde sale el idioma.
 | `python3 scraper.py --informe --forzar` | El resumen, sea la hora que sea |
 | `python3 scraper.py --comandos` | Atiende los comandos pendientes de Telegram |
 | `python3 scraper.py --menu` | Publica el menú de comandos en Telegram |
+| `python3 scraper.py --sin-avisos ...` | No envía nada a Telegram, solo registra qué enviaría |
+
+> **Cuidado al ejecutar en local.** El vigilante corre en la nube y el estado
+> vive en `estado.sql`, así que una ronda local envía avisos por su cuenta y
+> deja el estado divergente: al subirlo, la nube ve como cambios lo que hiciste
+> tú. Para probar en local, usa siempre `--sin-avisos`, y antes de tocar nada
+> haz `git pull` para partir del estado real.
 
 ---
 

@@ -473,7 +473,6 @@ INSERT INTO "articulos" VALUES('https://www.pokemillon.com/products/jewelry-bonn
 INSERT INTO "articulos" VALUES('https://www.pokemillon.com/products/jewelry-bonney-op07-019-v-2-500-years-into-the-future#54056731509059','https://www.pokemillon.com/collections/one-piece?filter.v.availability=1','Pokemillón','One Piece','https://www.pokemillon.com/products/jewelry-bonney-op07-019-v-2-500-years-into-the-future?variant=54056731509059','Jewelry Bonney (OP07-019) (V.2) 500 Years into the Future','129,90 €',NULL,0,'2026-08-30T20:10:35+00:00','2026-08-30T20:53:45+00:00');
 INSERT INTO "articulos" VALUES('https://www.pokemillon.com/products/jewelry-bonney-op07-019-v-2-500-years-into-the-future#54056731902275','https://www.pokemillon.com/collections/one-piece?filter.v.availability=1','Pokemillón','One Piece','https://www.pokemillon.com/products/jewelry-bonney-op07-019-v-2-500-years-into-the-future?variant=54056731902275','Jewelry Bonney (OP07-019) (V.2) 500 Years into the Future','129,90 €',NULL,1,'2026-08-30T20:10:35+00:00','2026-08-30T20:53:45+00:00');
 INSERT INTO "articulos" VALUES('https://flashstore.es/producto/one-piece-op-17-4th-anniversary-chn/','https://flashstore.es/categoria/one-piece/?stock_status=instock','Flash Store','One Piece','https://flashstore.es/producto/one-piece-op-17-4th-anniversary-chn/','One Piece OP-17 4th Anniversary CHN','144,90 €','Chino',1,'2026-08-30T20:11:33+00:00','2026-08-30T20:53:36+00:00');
-INSERT INTO "articulos" VALUES('https://flashstore.es/producto/prueba-formato/','https://flashstore.es/categoria/one-piece/?stock_status=instock','Flash Store','One Piece','https://flashstore.es/producto/prueba-formato/','Producto de prueba de formato','24,99 €','Japonés',0,'2026-08-30','2026-08-30T20:34:06+00:00');
 CREATE TABLE estado (
             clave TEXT PRIMARY KEY,
             valor TEXT
@@ -492,9 +491,8 @@ CREATE TABLE eventos (
         );
 INSERT INTO "eventos" VALUES(1,'2026-08-30T20:11:38+00:00','nuevo','Flash Store','One Piece','One Piece OP-17 4th Anniversary CHN','144,90 €','Chino','https://flashstore.es/producto/one-piece-op-17-4th-anniversary-chn/');
 INSERT INTO "eventos" VALUES(3,'2026-08-30T20:11:46+00:00','repuesto','Pokemillón','One Piece','One Piece Caja Sobres PRB-02 The Best vol.2 Premium Collection','84,90 €','Japonés','https://www.pokemillon.com/products/one-piece-prb-02-box?variant=53440396656963');
-INSERT INTO "eventos" VALUES(4,'2026-08-30T20:34:06+00:00','agotado','Flash Store','One Piece','Producto de prueba de formato','24,99 €','Japonés','https://flashstore.es/producto/prueba-formato/');
-CREATE INDEX idx_eventos_fecha ON eventos(fecha);
-CREATE INDEX idx_articulos_fuente ON articulos(fuente_url);
 DELETE FROM "sqlite_sequence";
 INSERT INTO "sqlite_sequence" VALUES('eventos',4);
+CREATE INDEX idx_eventos_fecha ON eventos(fecha);
+CREATE INDEX idx_articulos_fuente ON articulos(fuente_url);
 COMMIT;
