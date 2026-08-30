@@ -217,9 +217,23 @@ def load_fuentes(path: str) -> List[dict]:
                 "seed_max_pages": seed_pages_base,
             },
         )
+        tipo = entrada.get("tipo", "auto")
+        if tipo not in ("auto", "html", "shopify"):
+            raise ValueError(
+                f'La fuente #{i} de {path} tiene un "tipo" desconocido: {tipo!r}. '
+                'Usa "auto", "html" o "shopify".'
+            )
+        if tipo == "auto":
+            tipo = "shopify" if es_shopify(url) else "html"
+
         cfg["urls"].append(
             {
                 "url": url,
+                "tipo": tipo,
+                # Solo para Shopify: descarta los productos agotados. Es lo que
+                # hace el filtro ?filter.v.availability=1 de la propia tienda,
+                # que la API JSON no aplica por sí sola.
+                "solo_disponibles": bool(entrada.get("solo_disponibles", False)),
                 "selectors": selectores,
                 "tienda": entrada.get("tienda") or derivar_tienda(url, nombres),
                 "max_pages": entrada.get("max_pages", max_pages_base),
@@ -440,6 +454,120 @@ def find_page_urls(html: str, source_url: str, max_pages: int,
 
 
 # --------------------------------------------------------------------------- #
+# Shopify (API JSON)
+# --------------------------------------------------------------------------- #
+
+SHOPIFY_POR_PAGINA = 250   # máximo que admite products.json
+SHOPIFY_MAX_PAGINAS = 20   # tope de seguridad: 5.000 productos por colección
+
+
+def es_shopify(url: str) -> bool:
+    return "/collections/" in urlparse(url).path
+
+
+def _formato_euros(valor: float) -> str:
+    """4900.0 -> '4.900,00 €'"""
+    return f"{valor:,.2f}".replace(",", "\x00").replace(".", ",").replace("\x00", ".") + " €"
+
+
+def _precio_shopify(producto: dict, solo_disponibles: bool) -> str:
+    """Precio a mostrar de un producto de Shopify.
+
+    Un producto puede tener varias variantes a precios muy distintos (p.ej.
+    la versión en inglés a 279,99 € agotada y la japonesa a 84,90 € en stock).
+    Enseñar uno cualquiera engañaría, así que: si solo interesan los
+    disponibles, se ignoran los precios de las variantes agotadas; y si aun así
+    quedan precios distintos, se indica que es un "desde".
+    """
+    variantes = producto.get("variants", [])
+    if solo_disponibles:
+        disponibles = [v for v in variantes if v.get("available")]
+        if disponibles:
+            variantes = disponibles
+
+    precios = set()
+    for variante in variantes:
+        try:
+            precios.add(float(variante["price"]))
+        except (KeyError, TypeError, ValueError):
+            continue
+
+    if not precios:
+        return ""
+    if len(precios) == 1:
+        return _formato_euros(precios.pop())
+    return "desde " + _formato_euros(min(precios))
+
+
+def productos_shopify(fuente: dict, solo_disponibles: bool) -> (List[dict], int):
+    """Lee una colección de Shopify por su API JSON en vez de raspar el HTML.
+
+    Muchos temas de Shopify pintan la parrilla de productos con JavaScript, así
+    que el HTML que llega no contiene el listado (o contiene solo widgets de
+    recomendaciones, que darían avisos de productos equivocados). products.json
+    es parte de Shopify, no del tema, así que no se rompe cuando la tienda
+    cambia de diseño, y además trae la disponibilidad de cada variante.
+    """
+    partes = urlparse(fuente["url"])
+    trozos = [t for t in partes.path.split("/") if t]
+    try:
+        handle = trozos[trozos.index("collections") + 1]
+    except (ValueError, IndexError):
+        logging.error("No se pudo sacar la colección de %s", fuente["url"])
+        return [], 1
+
+    origen = f"{partes.scheme}://{partes.netloc}"
+    api = f"{origen}/collections/{handle}/products.json"
+
+    productos = []
+    descartados = 0
+    errores = 0
+
+    for pagina in range(1, SHOPIFY_MAX_PAGINAS + 1):
+        try:
+            resp = requests.get(
+                api,
+                params={"limit": SHOPIFY_POR_PAGINA, "page": pagina},
+                headers={"User-Agent": USER_AGENT},
+                timeout=REQUEST_TIMEOUT,
+            )
+            resp.raise_for_status()
+            lote = resp.json().get("products", [])
+        except (requests.RequestException, ValueError) as e:
+            logging.error("Fallo leyendo %s (página %d): %s", api, pagina, e)
+            errores += 1
+            break
+
+        for prod in lote:
+            disponible = any(v.get("available") for v in prod.get("variants", []))
+            if solo_disponibles and not disponible:
+                descartados += 1
+                continue
+            imagenes = prod.get("images") or []
+            productos.append(
+                {
+                    "product_url": f"{origen}/products/{prod['handle']}",
+                    "title": prod.get("title") or "(sin título)",
+                    "price": _precio_shopify(prod, solo_disponibles),
+                    "image": imagenes[0].get("src") if imagenes else None,
+                }
+            )
+
+        if len(lote) < SHOPIFY_POR_PAGINA:
+            break
+        time.sleep(random.uniform(*DELAY_BETWEEN_URLS))
+
+    detalle = f" ({descartados} agotados descartados)" if descartados else ""
+    logging.info("%s -> %d productos%s", api, len(productos), detalle)
+
+    if not productos and not errores:
+        logging.error("0 productos en %s: ¿ha cambiado la colección?", api)
+        errores += 1
+
+    return productos, errores
+
+
+# --------------------------------------------------------------------------- #
 # Telegram
 # --------------------------------------------------------------------------- #
 
@@ -597,7 +725,31 @@ def diagnosticar(url: str, selectors: dict) -> int:
 
     html = resp.text
     soup = BeautifulSoup(html, "html.parser")
-    print(f"   Plataforma detectada: {detectar_plataforma(html)}")
+    plataforma = detectar_plataforma(html)
+    print(f"   Plataforma detectada: {plataforma}")
+
+    if es_shopify(str(resp.url)):
+        print("\n   Es una colección de Shopify: se leerá por su API JSON en vez")
+        print("   de raspar el HTML (muchos temas pintan la parrilla por JavaScript).")
+        fuente = {"url": str(resp.url)}
+        todos, errores = productos_shopify(fuente, solo_disponibles=False)
+        disponibles, _ = productos_shopify(fuente, solo_disponibles=True)
+        if errores or not todos:
+            print("\n❌ No se pudo leer la colección por la API.")
+            return 1
+        print(f"\n   Productos en la colección: {len(todos)}")
+        print(f"   De ellos, disponibles:     {len(disponibles)}")
+        print("\n   Muestra:\n")
+        for prod in disponibles[:3] or todos[:3]:
+            print(f"     • {prod['title']}")
+            print(f"       precio: {prod['price'] or '(no detectado)'}")
+            print(f"       imagen: {'sí' if prod['image'] else 'NO detectada'}")
+            print(f"       enlace: {prod['product_url']}")
+        print("\n   Añádela así (quita solo_disponibles si quieres también los agotados):")
+        print('     { "url": "%s",' % url)
+        print('       "categoria": "TU_CATEGORIA", "solo_disponibles": true }')
+        print("\n✅ Esta URL se puede añadir.\n")
+        return 0
 
     contador = soup.select_one(".woocommerce-result-count, .product-count, .toolbar-amount")
     if contador:
@@ -648,6 +800,51 @@ def diagnosticar(url: str, selectors: dict) -> int:
 # Ejecución principal
 # --------------------------------------------------------------------------- #
 
+def productos_html(fuente: dict, max_pages: int) -> (List[dict], int):
+    """Raspa una categoría en HTML, recorriendo su paginación."""
+    source_url = fuente["url"]
+    selectors = fuente["selectors"]
+    productos = []
+    vistos = set()
+    errores = 0
+
+    try:
+        html = fetch_html(source_url)
+    except requests.RequestException as e:
+        logging.error("No se pudo descargar %s: %s", source_url, e)
+        return [], 1
+
+    paginas = [(source_url, html)]
+    for page_url in find_page_urls(html, source_url, max_pages, selectors["pagination"]):
+        time.sleep(random.uniform(*DELAY_BETWEEN_URLS))
+        try:
+            paginas.append((page_url, fetch_html(page_url)))
+        except requests.RequestException as e:
+            logging.error("No se pudo descargar %s: %s", page_url, e)
+            errores += 1
+
+    for page_url, page_html in paginas:
+        encontrados = parse_products(page_html, page_url, selectors)
+        logging.info("%s -> %d productos encontrados", page_url, len(encontrados))
+
+        if not encontrados:
+            # La página se descargó pero no se reconoció ningún producto:
+            # señal de que la tienda ha cambiado de plantilla.
+            logging.error(
+                "0 productos en %s: puede que la tienda haya cambiado su HTML "
+                "y haya que revisar los selectores de esta fuente.",
+                page_url,
+            )
+            errores += 1
+
+        for producto in encontrados:
+            if producto["product_url"] not in vistos:
+                vistos.add(producto["product_url"])
+                productos.append(producto)
+
+    return productos, errores
+
+
 def run(cfg: dict, force_seed: bool = False) -> int:
     """Ejecuta una pasada. Devuelve el número de fallos (0 = todo bien).
 
@@ -677,63 +874,39 @@ def run(cfg: dict, force_seed: bool = False) -> int:
         etiqueta = f"{cfg['categoria']} · {tienda}"
         max_pages = fuente["seed_max_pages"] if seed_mode else fuente["max_pages"]
 
-        try:
-            html = fetch_html(source_url)
-        except requests.RequestException as e:
-            logging.error("No se pudo descargar %s: %s", source_url, e)
-            errores += 1
-            continue
+        if fuente["tipo"] == "shopify":
+            products, fallos = productos_shopify(fuente, fuente["solo_disponibles"])
+        else:
+            products, fallos = productos_html(fuente, max_pages)
+        errores += fallos
 
-        pages = [(source_url, html)]
-        for page_url in find_page_urls(html, source_url, max_pages, selectors["pagination"]):
-            time.sleep(random.uniform(*DELAY_BETWEEN_URLS))
-            try:
-                pages.append((page_url, fetch_html(page_url)))
-            except requests.RequestException as e:
-                logging.error("No se pudo descargar %s: %s", page_url, e)
-                errores += 1
+        for product in products:
+            if already_seen(conn, product["product_url"]):
+                continue
 
-        for page_url, page_html in pages:
-            products = parse_products(page_html, page_url, selectors)
-            logging.info("%s -> %d productos encontrados", page_url, len(products))
-
-            if not products:
-                # La página se descargó pero no se reconoció ningún producto:
-                # señal de que la tienda ha cambiado de plantilla.
-                logging.error(
-                    "0 productos en %s: puede que la tienda haya cambiado su HTML "
-                    "y haya que revisar parse_products().",
-                    page_url,
+            if not seed_mode:
+                enviado = send_telegram(
+                    cfg["telegram"]["bot_token"],
+                    cfg["telegram"]["chat_id"],
+                    product,
+                    etiqueta,
                 )
-                errores += 1
-
-            for product in products:
-                if already_seen(conn, product["product_url"]):
+                if not enviado:
+                    # No se marca como visto: así se reintenta en la siguiente
+                    # pasada en vez de perder el aviso.
+                    logging.error("Aviso NO enviado, se reintentará: %s", product["title"])
+                    errores += 1
                     continue
+                logging.info("Nuevo producto notificado: [%s] %s", tienda, product["title"])
+                total_new += 1
 
-                if not seed_mode:
-                    enviado = send_telegram(
-                        cfg["telegram"]["bot_token"],
-                        cfg["telegram"]["chat_id"],
-                        product,
-                        etiqueta,
-                    )
-                    if not enviado:
-                        # No se marca como visto: así se reintenta en la
-                        # siguiente pasada en vez de perder el aviso.
-                        logging.error("Aviso NO enviado, se reintentará: %s", product["title"])
-                        errores += 1
-                        continue
-                    logging.info("Nuevo producto notificado: [%s] %s", tienda, product["title"])
-                    total_new += 1
-
-                mark_seen(
-                    conn,
-                    product["product_url"],
-                    product["title"],
-                    product["price"],
-                    page_url,
-                )
+            mark_seen(
+                conn,
+                product["product_url"],
+                product["title"],
+                product["price"],
+                source_url,
+            )
 
         time.sleep(random.uniform(*DELAY_BETWEEN_URLS))
 

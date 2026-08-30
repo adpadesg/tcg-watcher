@@ -72,9 +72,46 @@ De un dominio no siempre se puede sacar un nombre bonito: partir `flashstore` en
 | Campo | Para qué |
 |---|---|
 | `tienda` | Fuerza el nombre de tienda solo en esa URL |
+| `tipo` | `auto` (por defecto), `html` o `shopify` |
+| `solo_disponibles` | Solo Shopify: descarta los productos agotados |
 | `selectors` | Ajusta el HTML si esa tienda usa otra plantilla (ver abajo) |
 | `max_pages` | Páginas a revisar en cada pasada, solo para esa URL |
 | `seed_max_pages` | Páginas a recorrer al sembrar, solo para esa URL |
+
+### Tiendas Shopify
+
+Las URLs con `/collections/` se detectan como Shopify y **no se raspan en
+HTML**: se leen por `products.json`, la API que Shopify expone en todas sus
+tiendas.
+
+No es un atajo, es una necesidad: muchos temas de Shopify pintan la parrilla de
+productos con JavaScript, así que el HTML que llega **no contiene el listado**.
+En Pokemillón, por ejemplo, el contenedor de la parrilla viene vacío y las
+únicas fichas del HTML son widgets de recomendaciones — raspar eso daría avisos
+de productos que no pertenecen a la colección.
+
+Ventajas de la API: trae la colección entera (sin depender de la paginación por
+scroll infinito), no se rompe cuando la tienda cambia de tema, e incluye la
+disponibilidad de cada variante.
+
+```json
+{
+  "url": "https://www.pokemillon.com/collections/one-piece?filter.v.availability=1",
+  "categoria": "One Piece",
+  "solo_disponibles": true
+}
+```
+
+- `solo_disponibles: true` reproduce el filtro `?filter.v.availability=1` de la
+  tienda. La API no lo aplica sola, así que hay que pedirlo aquí.
+- **El precio tiene en cuenta las variantes.** Un producto puede tener la
+  versión inglesa a 279,99 € agotada y la japonesa a 84,90 € en stock; con
+  `solo_disponibles` se ignoran los precios de las variantes agotadas, y si aun
+  así quedan varios precios se muestra `desde 84,90 €`.
+- **Efecto secundario a tener en cuenta:** con `solo_disponibles`, un producto
+  agotado no se guarda. Si vuelve a stock, aparecerá como nuevo y te avisará
+  — que suele ser justo lo que quieres. Pero solo la primera vez: a partir de
+  ahí ya está en la base de datos.
 
 En la raíz del fichero, `max_pages`, `seed_max_pages` y `selectors` fijan el
 valor por defecto de todas las URLs.
