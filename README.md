@@ -148,10 +148,22 @@ python3 scraper.py --listar
   "categoria": "One Piece" }
 ```
 
-> **Norma: la URL va filtrada por stock.** En WooCommerce, con
-> `?stock_status=instock`. En Shopify no hace falta: la API da la
-> disponibilidad de cada variante. Al paginar se conserva la query, así que el
-> filtro sigue aplicándose en las páginas 2, 3...
+> **Lo que importa es saber la disponibilidad de cada producto.** Hay tres
+> mecanismos, y se usan por este orden:
+>
+> | Tienda | Cómo se sabe el stock |
+> |---|---|
+> | Shopify | La API da la disponibilidad de cada variante |
+> | WooCommerce con clases | Cada ficha del listado lleva `instock` / `outofstock` |
+> | WooCommerce sin clases | Filtrando la URL con `?stock_status=instock` |
+>
+> Si la tienda marca las fichas, **no hace falta filtrar la URL** y además se
+> conocen los agotados, así que se puede avisar cuando vuelvan. Ojo: no todas
+> las tiendas admiten el filtro — en ManaVortex `?stock_status=instock` no
+> hace nada, devuelve el catálogo entero.
+>
+> Al paginar se conserva la query, así que un filtro en la URL sigue
+> aplicándose en las páginas 2, 3...
 
 **La tienda se deduce del dominio.** De `flashstore.es` no se puede sacar
 "Flash Store" automáticamente (partir la palabra requeriría un diccionario),
@@ -165,6 +177,7 @@ de ese dominio) o con `"tienda"` en la entrada (solo para esa).
 | `tienda` | Fuerza el nombre de tienda solo en esa URL |
 | `tipo` | `auto` (por defecto), `html` o `shopify` |
 | `selectors` | Ajusta el HTML si la tienda usa otra plantilla |
+| `selectors.atributos` | Vacío (`""`) si la tienda no publica el idioma: evita una petición inútil por producto |
 | `max_pages` | Páginas a recorrer, solo para esa URL |
 
 ---

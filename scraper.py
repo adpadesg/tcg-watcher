@@ -66,6 +66,10 @@ DEFAULT_SELECTORS = {
     "pagination": ".woocommerce-pagination a, nav.pagination a, .page-numbers a",
     # Tabla de atributos de la ficha, de donde se saca el idioma
     "atributos": ".woocommerce-product-attributes, .shop_attributes",
+    # WooCommerce marca cada ficha del listado con su disponibilidad. Sirve
+    # para tiendas donde el filtro ?stock_status=instock no hace nada.
+    "clases_agotado": ["outofstock"],
+    "clases_en_stock": ["instock"],
 }
 
 BANDERAS = {
@@ -476,8 +480,19 @@ def parse_products(html: str, source_url: str, selectors: Optional[dict] = None)
         el_precio = _first_match(contenedor, selectors["price"])
         precio = clean_price(el_precio.get_text(" ", strip=True)) if el_precio else ""
 
+        # Disponibilidad según las clases de la ficha. None = la tienda no lo
+        # dice, y entonces manda el filtro de la URL.
+        clases_ficha = set(contenedor.get("class") or [])
+        if clases_ficha.intersection(selectors.get("clases_agotado", [])):
+            en_stock = 0
+        elif clases_ficha.intersection(selectors.get("clases_en_stock", [])):
+            en_stock = 1
+        else:
+            en_stock = None
+
         vistos.add(product_url)
-        productos.append({"product_url": product_url, "titulo": titulo, "precio": precio})
+        productos.append({"product_url": product_url, "titulo": titulo,
+                          "precio": precio, "en_stock": en_stock})
 
     return productos
 
@@ -583,7 +598,9 @@ def articulos_html(fuente: dict, conn) -> Tuple[List[dict], bool, int]:
                 "titulo": prod["titulo"],
                 "precio": prod["precio"],
                 "idioma": None,      # se completa desde la ficha si es nuevo
-                "en_stock": 1,
+                # Si la tienda no marca la disponibilidad, se confía en que la
+                # URL viene filtrada por stock y todo lo listado está a la venta.
+                "en_stock": 1 if prod["en_stock"] is None else prod["en_stock"],
             })
 
     if truncado:
@@ -944,7 +961,10 @@ def run(telegram: dict, fuentes: List[dict], sembrar: bool = False) -> int:
             if anterior is None:
                 # Producto desconocido. El idioma de las tiendas en HTML está en
                 # la ficha, así que se consulta solo ahora: no cambia nunca.
-                if art["idioma"] is None and fuente["tipo"] == "html":
+                # Si la tienda no publica el idioma en la ficha, no se pierde
+                # una petición por producto para no encontrar nada.
+                if (art["idioma"] is None and fuente["tipo"] == "html"
+                        and fuente["selectors"].get("atributos")):
                     time.sleep(random.uniform(*DELAY_BETWEEN_URLS))
                     art["idioma"] = idioma_de_ficha(art["product_url"], fuente["selectors"])
                 conn.execute(

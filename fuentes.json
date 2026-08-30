@@ -6,7 +6,8 @@
   },
   "nombres_tienda": {
     "flashstore.es": "Flash Store",
-    "pokemillon.com": "Pokemillón"
+    "pokemillon.com": "Pokemillón",
+    "manavortex.es": "ManaVortex"
   },
   "emojis_categoria": {
     "One Piece": "🏴‍☠️"
@@ -22,6 +23,13 @@
     {
       "url": "https://www.pokemillon.com/collections/one-piece?filter.v.availability=1",
       "categoria": "One Piece"
+    },
+    {
+      "url": "https://manavortex.es/cateogoria-producto/tcg/one-piece-tcg/",
+      "categoria": "One Piece",
+      "selectors": {
+        "atributos": ""
+      }
     }
   ]
 }
