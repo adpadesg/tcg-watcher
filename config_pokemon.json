@@ -1,0 +1,14 @@
+{
+  "categoria": "Pokemon",
+  "urls": [
+    "https://flashstore.es/categoria/pokemon/"
+  ],
+  "telegram": {
+    "bot_token": "${TELEGRAM_BOT_TOKEN}",
+    "chat_id": "${TELEGRAM_CHAT_ID}"
+  },
+  "db_path": "seen_pokemon.db",
+  "log_path": "log_pokemon.log",
+  "max_pages": 3,
+  "seed_max_pages": 70
+}

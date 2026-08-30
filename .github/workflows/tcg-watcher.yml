@@ -1,0 +1,61 @@
+name: TCG Watcher
+
+on:
+  schedule:
+    # Cada 10 minutos. GitHub no garantiza puntualidad: en horas punta
+    # las ejecuciones programadas pueden retrasarse bastante.
+    - cron: "*/10 * * * *"
+  workflow_dispatch:        # permite lanzarlo a mano desde la pestaña Actions
+
+permissions:
+  contents: write           # necesario para guardar los productos ya vistos
+
+concurrency:
+  # Evita que dos ejecuciones se pisen al escribir la base de datos
+  group: tcg-watcher
+  cancel-in-progress: false
+
+jobs:
+  vigilar:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Instalar dependencias
+        run: pip install -r requirements.txt
+
+      - name: Vigilar categorías
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          fallo=0
+          for cfg in config_*.json; do
+            echo "::group::$cfg"
+            python scraper.py "$cfg" || { echo "❌ Falló $cfg"; fallo=1; }
+            echo "::endgroup::"
+          done
+          echo "FALLO=$fallo" >> "$GITHUB_ENV"
+
+      - name: Guardar productos ya vistos
+        if: always()
+        run: |
+          git config user.name "tcg-watcher"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add seen_*.db
+          if git diff --cached --quiet; then
+            echo "Sin productos nuevos: nada que guardar."
+            exit 0
+          fi
+          git commit -m "Actualiza catálogo visto ($(date -u +'%Y-%m-%d %H:%M UTC'))"
+          git pull --rebase --autostash
+          git push
+
+      - name: Marcar el job como fallido si alguna categoría dio error
+        if: always() && env.FALLO == '1'
+        run: exit 1

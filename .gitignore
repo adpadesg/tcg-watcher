@@ -1,0 +1,13 @@
+# Secretos: NUNCA subir el token del bot
+.env
+
+# Entorno virtual y caché de Python
+venv/
+__pycache__/
+*.pyc
+
+# Logs (se regeneran en cada ejecución)
+*.log
+
+# Copias de seguridad
+*.bak
