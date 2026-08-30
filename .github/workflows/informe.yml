@@ -25,6 +25,21 @@ jobs:
           cache: pip
       - run: pip install -r requirements.txt
 
+      - name: Comprobar el token de Telegram
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+        run: |
+          # Si el secret está mal, el fallo aparece aquí con un mensaje claro
+          # en vez de reventar más adelante sin explicación.
+          codigo=$(curl -s -o /dev/null -w "%{http_code}" \
+            "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/getMe")
+          if [ "$codigo" != "200" ]; then
+            echo "❌ Telegram devolvió HTTP $codigo al validar el token."
+            echo "   Revisa el secret TELEGRAM_BOT_TOKEN en Settings > Secrets and variables > Actions."
+            exit 1
+          fi
+          echo "✅ Token válido."
+
       - name: Enviar el resumen del día
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}

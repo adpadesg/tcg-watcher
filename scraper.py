@@ -26,6 +26,7 @@ import re
 import sqlite3
 import sys
 import time
+import html
 import unicodedata
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -66,6 +67,13 @@ DEFAULT_SELECTORS = {
     # Tabla de atributos de la ficha, de donde se saca el idioma
     "atributos": ".woocommerce-product-attributes, .shop_attributes",
 }
+
+BANDERAS = {
+    "Español": "🇪🇸", "Inglés": "🇬🇧", "Japonés": "🇯🇵", "Chino": "🇨🇳",
+    "Coreano": "🇰🇷", "Francés": "🇫🇷", "Alemán": "🇩🇪", "Italiano": "🇮🇹",
+}
+BANDERA_DESCONOCIDA = "❔"
+EMOJI_CATEGORIA_POR_DEFECTO = "🃏"
 
 IDIOMAS_CONOCIDOS = {
     "español": "Español", "castellano": "Español", "esp": "Español", "spa": "Español",
@@ -178,6 +186,9 @@ def load_fuentes(path: str) -> Tuple[dict, List[dict]]:
 
     telegram = {k: expand_env(v) for k, v in raiz["telegram"].items()}
     nombres = {k.lower(): v for k, v in raiz.get("nombres_tienda", {}).items()}
+    # Cada categoría lleva su emoji para que los resúmenes con varias
+    # categorías se distingan de un vistazo.
+    emojis = {slug(k): v for k, v in raiz.get("emojis_categoria", {}).items()}
 
     selectores_base = dict(DEFAULT_SELECTORS)
     selectores_base.update(raiz.get("selectors", {}))
@@ -221,6 +232,7 @@ def load_fuentes(path: str) -> Tuple[dict, List[dict]]:
         fuentes.append({
             "url": url,
             "categoria": categoria,
+            "emoji": emojis.get(slug(categoria), EMOJI_CATEGORIA_POR_DEFECTO),
             "tipo": tipo,
             "tienda": entrada.get("tienda") or derivar_tienda(url, nombres),
             "selectors": selectores,
@@ -655,8 +667,28 @@ def articulos_shopify(fuente: dict) -> Tuple[List[dict], bool, int]:
 LIMITE_TELEGRAM = 3900   # el máximo real son 4096; se deja margen
 
 
+def bandera(idioma: Optional[str]) -> str:
+    return BANDERAS.get(idioma or "", BANDERA_DESCONOCIDA)
+
+
+def esc(texto: Optional[str]) -> str:
+    """Escapa el texto para el modo HTML de Telegram."""
+    return html.escape(texto or "", quote=False)
+
+
+def enlace(url: Optional[str], texto: str = "Pincha aquí") -> str:
+    """Enlace corto, para que el mensaje no se llene de URLs largas."""
+    if not url:
+        return ""
+    return f'🔗 <a href="{html.escape(url, quote=True)}">{esc(texto)}</a>' 
+
+
 def enviar_mensaje(telegram: dict, texto: str, chat_id: Optional[str] = None) -> bool:
-    """Envía un mensaje, troceándolo si excede el límite de Telegram."""
+    """Envía un mensaje en modo HTML, troceándolo si excede el límite.
+
+    El corte se hace siempre entre líneas: partir por la mitad dejaría una
+    etiqueta <a> abierta y Telegram rechazaría el mensaje entero.
+    """
     destino = chat_id or telegram["chat_id"]
     api = f"https://api.telegram.org/bot{telegram['bot_token']}/sendMessage"
 
@@ -673,7 +705,8 @@ def enviar_mensaje(telegram: dict, texto: str, chat_id: Optional[str] = None) ->
         try:
             r = requests.post(
                 api,
-                data={"chat_id": destino, "text": trozo, "disable_web_page_preview": True},
+                data={"chat_id": destino, "text": trozo, "parse_mode": "HTML",
+                      "disable_web_page_preview": True},
                 timeout=REQUEST_TIMEOUT,
             )
             if r.status_code != 200:
@@ -685,38 +718,33 @@ def enviar_mensaje(telegram: dict, texto: str, chat_id: Optional[str] = None) ->
     return True
 
 
-def linea_articulo(art: dict) -> str:
-    partes = [art["titulo"]]
+ESTADOS = {
+    "nuevo":    ("🟢 Nuevo", "Nuevo ✅"),
+    "repuesto": ("🔄 Vuelve a estar disponible", "De nuevo disponible 🔄"),
+    "agotado":  ("🔴 Agotado", "Agotado ❌"),
+}
+
+
+def bloque_aviso(art: dict) -> str:
+    """Bloque de un producto en un aviso: un dato por línea, sin apelotonar."""
+    lineas = [f"<b>{esc(art['titulo'])}</b>"]
     if art.get("precio"):
-        partes.append(art["precio"])
+        lineas.append(f"💰 {esc(art['precio'])}")
     if art.get("idioma"):
-        partes.append(art["idioma"])
-    return " · ".join(partes)
-
-
-ENCABEZADOS = {
-    "nuevo": "🆕 Se ha añadido un nuevo producto de {categoria} en {tienda}",
-    "repuesto": "🔄 Vuelve a estar disponible un producto de {categoria} en {tienda}",
-    "agotado": "❌ Se ha agotado un producto de {categoria} en {tienda}",
-}
-ENCABEZADOS_PLURAL = {
-    "nuevo": "🆕 Se han añadido {n} productos de {categoria} en {tienda}",
-    "repuesto": "🔄 Vuelven a estar disponibles {n} productos de {categoria} en {tienda}",
-    "agotado": "❌ Se han agotado {n} productos de {categoria} en {tienda}",
-}
+        lineas.append(f"{bandera(art['idioma'])} Idioma: {esc(art['idioma'])}")
+    destino = enlace(art.get("product_url"))
+    if destino:
+        lineas.append(destino)
+    return "\n".join(lineas)
 
 
 def avisar_cambios(telegram: dict, tipo: str, tienda: str, categoria: str,
-                   articulos: List[dict]) -> bool:
+                   emoji: str, articulos: List[dict]) -> bool:
     """Un mensaje por tienda y tipo de cambio, en vez de uno por producto."""
-    plantilla = ENCABEZADOS[tipo] if len(articulos) == 1 else ENCABEZADOS_PLURAL[tipo]
-    lineas = [plantilla.format(n=len(articulos), tienda=tienda, categoria=categoria), ""]
-    for art in articulos:
-        lineas.append(linea_articulo(art))
-        if art.get("product_url"):
-            lineas.append(art["product_url"])
-        lineas.append("")
-    return enviar_mensaje(telegram, "\n".join(lineas).strip())
+    titulo, _ = ESTADOS[tipo]
+    cabecera = f"{titulo}\n\n{emoji} <b>{esc(categoria)} — {esc(tienda)}</b>"
+    bloques = [bloque_aviso(art) for art in articulos]
+    return enviar_mensaje(telegram, cabecera + "\n\n" + "\n\n".join(bloques))
 
 
 # --------------------------------------------------------------------------- #
@@ -821,7 +849,8 @@ def run(telegram: dict, fuentes: List[dict], sembrar: bool = False) -> int:
         for tipo, lote in (("nuevo", nuevos), ("repuesto", repuestos), ("agotado", agotados)):
             if not lote:
                 continue
-            if avisar_cambios(telegram, tipo, fuente["tienda"], fuente["categoria"], lote):
+            if avisar_cambios(telegram, tipo, fuente["tienda"], fuente["categoria"],
+                              fuente["emoji"], lote):
                 logging.info("Avisado: %d %s en %s", len(lote), tipo, fuente["tienda"])
             else:
                 logging.error("No se pudo avisar de %d %s en %s", len(lote), tipo, fuente["tienda"])
@@ -882,32 +911,40 @@ def informe_diario(telegram: dict, fuentes: List[dict], forzar: bool = False) ->
 
     fecha_texto = local.strftime("%d/%m/%Y")
     if not eventos:
-        texto = (f"📋 Resumen del {fecha_texto}\n\n"
+        texto = (f"📋 <b>Resumen del {fecha_texto}</b>\n\n"
                  "Hoy no ha habido movimientos en ninguna de las tiendas vigiladas.")
         logging.info("Informe diario: sin movimientos hoy.")
         return 0 if enviar_mensaje(telegram, texto) else 1
 
-    lineas = [f"📋 Resumen del {fecha_texto}", ""]
+    emojis = {f["categoria"]: f["emoji"] for f in fuentes}
+
+    # Agrupado por tienda dentro de cada categoría: así, al añadir categorías
+    # nuevas, el resumen sigue leyéndose sin convertirse en un muro de texto.
     agrupado = {}
     for ev in eventos:
-        agrupado.setdefault((ev["tienda"], ev["categoria"]), {}).setdefault(ev["tipo"], []).append(ev)
+        agrupado.setdefault((ev["categoria"], ev["tienda"]), []).append(ev)
 
-    NOMBRES = {"nuevo": "🆕 Nuevos", "repuesto": "🔄 Repuestos", "agotado": "❌ Agotados"}
-    for (tienda, categoria), por_tipo in agrupado.items():
-        lineas.append(f"— {categoria} · {tienda} —")
-        for tipo in ("nuevo", "repuesto", "agotado"):
-            lote = por_tipo.get(tipo)
-            if not lote:
-                continue
-            lineas.append(f"{NOMBRES[tipo]} ({len(lote)}):")
-            for ev in lote:
-                lineas.append(f"  · {linea_articulo(dict(ev))}")
-        lineas.append("")
+    secciones = []
+    for (categoria, tienda), lote in agrupado.items():
+        emoji = emojis.get(categoria, EMOJI_CATEGORIA_POR_DEFECTO)
+        bloques = [f"{emoji} <b>{esc(categoria)} — {esc(tienda)}</b>"]
+        for ev in lote:
+            _, etiqueta = ESTADOS.get(ev["tipo"], ("", ev["tipo"]))
+            partes = [f"<b>{esc(ev['titulo'])}</b>", etiqueta]
+            destino = enlace(ev["product_url"])
+            if destino:
+                partes.append(destino)
+            bloques.append("\n".join(partes))
+        secciones.append("\n\n".join(bloques))
 
     en_stock = conn.execute("SELECT COUNT(*) c FROM articulos WHERE en_stock=1").fetchone()["c"]
-    lineas.append(f"Total disponible ahora mismo: {en_stock} artículos.")
+    texto = (f"📋 <b>Resumen del {fecha_texto}</b>\n\n"
+             + "\n\n\n".join(secciones)
+             + f"\n\n\nTotal disponible ahora mismo: {en_stock} artículos.")
+
     logging.info("Informe diario: %d movimientos, %d artículos en stock.", len(eventos), en_stock)
-    return 0 if enviar_mensaje(telegram, "\n".join(lineas)) else 1
+    return 0 if enviar_mensaje(telegram, texto) else 1
+
 
 
 # --------------------------------------------------------------------------- #
@@ -915,13 +952,13 @@ def informe_diario(telegram: dict, fuentes: List[dict], forzar: bool = False) ->
 # --------------------------------------------------------------------------- #
 
 AYUDA = (
-    "Comandos disponibles:\n\n"
-    "/stock — listado de todo lo que hay en stock\n"
-    "/stock <tienda> — solo esa tienda (ej: /stock flashstore)\n"
-    "/tiendas — qué tiendas se están vigilando\n"
+    "<b>Comandos disponibles</b>\n\n"
+    "/stock — todo lo que hay en stock\n"
+    "/stock flashstore — solo esa tienda\n"
+    "/tiendas — qué se está vigilando\n"
     "/resumen — movimientos de hoy\n"
     "/ayuda — esto\n\n"
-    "Los comandos se atienden cada pocos minutos, no al instante."
+    "<i>Los comandos se atienden cada pocos minutos, no al instante.</i>"
 )
 
 
@@ -935,7 +972,8 @@ def _comparable(texto: str) -> str:
     return re.sub(r"[^a-z0-9]", "", slug(texto))
 
 
-def texto_stock(conn, filtro: Optional[str]) -> str:
+def texto_stock(conn, filtro: Optional[str], emojis: Optional[dict] = None) -> str:
+    emojis = emojis or {}
     filas = list(conn.execute(
         "SELECT * FROM articulos WHERE en_stock = 1 ORDER BY tienda, categoria, titulo"
     ))
@@ -958,10 +996,57 @@ def texto_stock(conn, filtro: Optional[str]) -> str:
         grupo = (fila["categoria"], fila["tienda"])
         if grupo != grupo_actual:
             grupo_actual = grupo
-            lineas.append(f"\n— {fila['categoria']} · {fila['tienda']} —")
-        lineas.append(f"· {linea_articulo(dict(fila))}")
-    lineas.append(f"\nTotal: {len(filas)} artículos en stock.")
+            emoji = emojis.get(fila["categoria"], EMOJI_CATEGORIA_POR_DEFECTO)
+            if lineas:
+                lineas.append("")
+            lineas.append(f"{emoji} <b>{esc(fila['categoria'])} — {esc(fila['tienda'])}</b>")
+            lineas.append("")
+
+        # La bandera va delante para poder barrer el listado por idioma de un
+        # vistazo, sin leer cada línea entera.
+        partes = [f"<b>{esc(fila['titulo'])}</b>"]
+        if fila["precio"]:
+            partes.append(esc(fila["precio"]))
+        destino = enlace(fila["product_url"])
+        if destino:
+            partes.append(destino)
+        lineas.append(f"{bandera(fila['idioma'])} " + " — ".join(partes))
+        lineas.append("")
+
+    lineas.append(f"Total: {len(filas)} artículos en stock.")
     return "\n".join(lineas).strip()
+
+
+
+MENU_COMANDOS = [
+    ("stock", "Todo lo que hay en stock ahora mismo"),
+    ("tiendas", "Qué tiendas se están vigilando"),
+    ("resumen", "Movimientos de hoy"),
+    ("ayuda", "Lista de comandos"),
+]
+
+
+def registrar_menu(telegram: dict) -> int:
+    """Publica el menú que Telegram sugiere al escribir "/" en el chat.
+
+    Se hace por API (setMyCommands), no hace falta configurarlo a mano en
+    BotFather. Basta con ejecutarlo una vez; Telegram lo recuerda.
+    """
+    try:
+        r = requests.post(
+            f"https://api.telegram.org/bot{telegram['bot_token']}/setMyCommands",
+            json={"commands": [{"command": c, "description": d} for c, d in MENU_COMANDOS]},
+            timeout=REQUEST_TIMEOUT,
+        )
+        if r.status_code != 200 or not r.json().get("ok"):
+            logging.error("Telegram rechazó el menú de comandos: %s", r.text[:200])
+            return 1
+    except (requests.RequestException, ValueError) as e:
+        logging.error("No se pudo registrar el menú: %s", e)
+        return 1
+    logging.info("Menú de comandos registrado: %s",
+                 ", ".join("/" + c for c, _ in MENU_COMANDOS))
+    return 0
 
 
 def atender_comandos(telegram: dict, fuentes: List[dict]) -> int:
@@ -982,10 +1067,22 @@ def atender_comandos(telegram: dict, fuentes: List[dict]) -> int:
             f"https://api.telegram.org/bot{telegram['bot_token']}/getUpdates",
             params=parametros, timeout=REQUEST_TIMEOUT,
         )
-        r.raise_for_status()
+        if r.status_code != 200:
+            # El mensaje de error de requests incluiría la URL, y la URL lleva
+            # el token dentro: se registra solo el código y la explicación.
+            detalle = ""
+            try:
+                detalle = r.json().get("description", "")
+            except ValueError:
+                pass
+            logging.error("Telegram devolvió HTTP %s al leer los comandos: %s",
+                          r.status_code, detalle)
+            if r.status_code == 401:
+                logging.error("401 = token rechazado. Revisa el secret TELEGRAM_BOT_TOKEN.")
+            return 1
         actualizaciones = r.json().get("result", [])
     except (requests.RequestException, ValueError) as e:
-        logging.error("No se pudieron leer los comandos: %s", e)
+        logging.error("No se pudieron leer los comandos: %s", type(e).__name__)
         return 1
 
     if not actualizaciones:
@@ -996,47 +1093,64 @@ def atender_comandos(telegram: dict, fuentes: List[dict]) -> int:
     ultimo = None
     for upd in actualizaciones:
         ultimo = upd["update_id"]
-        mensaje = upd.get("message") or upd.get("channel_post") or {}
-        texto = (mensaje.get("text") or "").strip()
-        chat = str((mensaje.get("chat") or {}).get("id", ""))
-        if not texto.startswith("/") or not chat:
-            continue
-
-        # El bot solo obedece al chat configurado: es público en Telegram y
-        # cualquiera que lo encuentre podría pedirle el listado.
-        if chat != str(telegram["chat_id"]):
-            logging.warning("Comando ignorado de un chat desconocido: %s", chat)
-            continue
-
-        partes = texto.split()
-        orden = partes[0].split("@")[0].lower()
-        argumento = " ".join(partes[1:]).strip() or None
-        logging.info("Comando recibido: %s", texto)
-
-        if orden in ("/stock", "/listado"):
-            respuesta = texto_stock(conn, argumento)
-        elif orden == "/tiendas":
-            filas = conn.execute(
-                "SELECT tienda, categoria, COUNT(*) t, SUM(en_stock) s"
-                " FROM articulos GROUP BY tienda, categoria"
-            )
-            respuesta = "\n".join(
-                f"· {f['categoria']} · {f['tienda']}: {f['s'] or 0} en stock de {f['t']}"
-                for f in filas
-            ) or "Todavía no hay nada vigilado."
-        elif orden == "/resumen":
-            informe_diario(telegram, fuentes, forzar=True)
-            continue
-        else:
-            respuesta = AYUDA
-
-        if not enviar_mensaje(telegram, respuesta, chat_id=chat):
+        try:
+            errores += _atender_una(telegram, fuentes, conn, upd)
+        except Exception:
+            # Si una actualización concreta revienta, el offset debe avanzar
+            # igualmente: si no, se reintentaría cada 5 minutos para siempre y
+            # bloquearía todos los comandos siguientes.
+            logging.exception("Fallo atendiendo la actualización %s", ultimo)
             errores += 1
 
     if ultimo is not None:
         escribir_estado(conn, "telegram_offset", ultimo + 1)
         guardar_volcado(conn, fuentes[0]["db_path"])
     return errores
+
+
+def _atender_una(telegram: dict, fuentes: List[dict], conn, upd: dict) -> int:
+    """Atiende una actualización. Devuelve 1 si no se pudo responder."""
+    mensaje = upd.get("message") or upd.get("channel_post") or {}
+    texto = (mensaje.get("text") or "").strip()
+    chat = str((mensaje.get("chat") or {}).get("id", ""))
+
+    if not texto.startswith("/") or not chat:
+        return 0
+
+    # El bot solo obedece al chat configurado: es público en Telegram y
+    # cualquiera que lo encuentre podría pedirle el listado.
+    if chat != str(telegram["chat_id"]):
+        logging.warning("Comando ignorado de un chat desconocido: %s", chat)
+        return 0
+
+    partes = texto.split()
+    orden = partes[0].split("@")[0].lower()
+    argumento = " ".join(partes[1:]).strip() or None
+    emojis = {f["categoria"]: f["emoji"] for f in fuentes}
+    logging.info("Comando recibido: %s", texto)
+
+    if orden in ("/stock", "/listado"):
+        respuesta = texto_stock(conn, argumento, emojis)
+    elif orden == "/tiendas":
+        filas = conn.execute(
+            "SELECT tienda, categoria, COUNT(*) t, SUM(en_stock) s"
+            " FROM articulos GROUP BY tienda, categoria ORDER BY categoria, tienda"
+        )
+        bloques = []
+        for f in filas:
+            emoji = emojis.get(f["categoria"], EMOJI_CATEGORIA_POR_DEFECTO)
+            bloques.append(
+                f"{emoji} <b>{esc(f['categoria'])} — {esc(f['tienda'])}</b>\n"
+                f"{f['s'] or 0} en stock de {f['t']} vigilados"
+            )
+        respuesta = "\n\n".join(bloques) or "Todavía no hay nada vigilado."
+    elif orden == "/resumen":
+        return informe_diario(telegram, fuentes, forzar=True)
+    else:
+        respuesta = AYUDA
+
+    return 0 if enviar_mensaje(telegram, respuesta, chat_id=chat) else 1
+
 
 
 # --------------------------------------------------------------------------- #
@@ -1218,6 +1332,8 @@ def main():
                         help="Con --informe, lo envía sea la hora que sea.")
     parser.add_argument("--comandos", action="store_true",
                         help="Atiende los comandos de Telegram pendientes.")
+    parser.add_argument("--menu", action="store_true",
+                        help="Publica el menú de comandos que Telegram sugiere al escribir '/'.")
     args = parser.parse_args()
 
     if args.check:
@@ -1242,6 +1358,8 @@ def main():
 
     if args.informe:
         sys.exit(1 if informe_diario(telegram, fuentes, forzar=args.forzar) else 0)
+    if args.menu:
+        sys.exit(registrar_menu(telegram))
     if args.comandos:
         sys.exit(1 if atender_comandos(telegram, fuentes) else 0)
 

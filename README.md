@@ -22,16 +22,29 @@ de comprar.
 ### Avisos
 
 Se agrupan por tienda y tipo de cambio, para no recibir veinte mensajes
-seguidos:
+seguidos. Un dato por línea:
 
 ```
-🆕 Se ha añadido un nuevo producto de One Piece en Flash Store
+🔴 Agotado
 
-One Piece OP-17 4th Anniversary CHN · 144,90 € · Chino
-https://flashstore.es/producto/...
+🏴‍☠️ One Piece — Flash Store
+
+One Piece Base Shop Vol.2
+💰 66,90 €
+🇯🇵 Idioma: Japonés
+🔗 Pincha aquí
 ```
 
-Los tres tipos: `🆕 nuevo`, `❌ agotado` y `🔄 vuelve a estar disponible`.
+Los tres tipos: `🟢 Nuevo`, `🔴 Agotado` y `🔄 Vuelve a estar disponible`.
+
+El emoji de cada categoría se configura en `fuentes.json`:
+
+```json
+"emojis_categoria": { "One Piece": "🏴‍☠️" }
+```
+
+Y el idioma se muestra con su bandera (`🇯🇵`, `🇬🇧`, `🇪🇸`...). Los artículos
+sin idioma conocido salen con `❔`.
 
 > El tercero no estaba en la especificación, pero sin él una reposición pasaría
 > **en silencio**: el producto ya se conoce, así que no sería "nuevo", y sin un
@@ -46,6 +59,25 @@ Los tres tipos: `🆕 nuevo`, `❌ agotado` y `🔄 vuelve a estar disponible`.
 | `/tiendas` | Qué se está vigilando y cuánto hay en stock |
 | `/resumen` | Los movimientos de hoy, sin esperar a las 20:00 |
 | `/ayuda` | La lista de comandos |
+
+El listado pone **la bandera del idioma al principio de cada línea**, para
+poder barrerlo de un vistazo:
+
+```
+🇯🇵 Producto X — 24,99 € — 🔗 Pincha aquí
+
+🇪🇸 Producto Y — 19,99 € — 🔗 Pincha aquí
+```
+
+**El menú que Telegram sugiere al escribir `/`** se publica desde el código,
+no desde BotFather:
+
+```bash
+python3 scraper.py --menu
+```
+
+Basta ejecutarlo una vez; Telegram lo recuerda. Hay que repetirlo solo si
+cambian los comandos.
 
 **No son instantáneos.** GitHub Actions no está encendido de forma continua:
 se despierta cada 5 minutos (su mínimo) y, en horas punta, los cron se
@@ -185,6 +217,7 @@ disponibilidad, que es de donde sale el idioma.
 | `python3 scraper.py --informe` | Resumen diario (solo si son las 20:00 en España) |
 | `python3 scraper.py --informe --forzar` | El resumen, sea la hora que sea |
 | `python3 scraper.py --comandos` | Atiende los comandos pendientes de Telegram |
+| `python3 scraper.py --menu` | Publica el menú de comandos en Telegram |
 
 ---
 
@@ -274,4 +307,12 @@ cuando hay cambios, se mantiene vivo solo.
 - **Subcategorías**: se descartan los contenedores con la clase
   `product-category`. WooCommerce marca también las subcategorías con la clase
   `product` y, sin filtrarlas, se notificarían como productos.
+- **Una actualización que falle no bloquea las siguientes**: si atender un
+  comando revienta, el offset avanza igualmente. Si no, ese mismo comando se
+  reintentaría cada 5 minutos para siempre y ningún otro llegaría a atenderse.
+- **Los errores de Telegram se registran sin el token**: el mensaje de error de
+  `requests` incluye la URL, y la URL lleva el token dentro. Se registra solo
+  el código HTTP y la descripción.
+- Cada workflow **valida el token antes de trabajar**, para que un secret mal
+  puesto dé un error claro en lugar de un fallo sin explicación.
 - Espera aleatoria de 2-5 s entre peticiones para no saturar las tiendas.
