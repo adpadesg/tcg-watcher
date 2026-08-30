@@ -13,6 +13,7 @@
   },
   "db_path": "estado.db",
   "max_pages": 20,
+  "horas_latido": 12,
   "fuentes": [
     {
       "url": "https://flashstore.es/categoria/one-piece/?stock_status=instock",

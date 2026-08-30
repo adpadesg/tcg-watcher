@@ -243,11 +243,34 @@ def load_fuentes(path: str) -> Tuple[dict, List[dict]]:
             "selectors": selectores,
             "max_pages": entrada.get("max_pages", max_pages_base),
             "db_path": raiz.get("db_path", "estado.db"),
+            "horas_latido": raiz.get("horas_latido", HORAS_LATIDO_POR_DEFECTO),
         })
 
     if not fuentes:
         raise ValueError(f"La lista 'fuentes' de {path} está vacía.")
     return telegram, fuentes
+
+
+class CapturaErrores(logging.Handler):
+    """Guarda los errores del log para poder avisarlos por Telegram.
+
+    Un vigilante que se rompe en silencio es inútil: si deja de avisar, el
+    silencio es indistinguible de "no hay novedades". Estos mensajes son los
+    que se mandan al chat cuando algo va mal.
+    """
+
+    def __init__(self):
+        super().__init__(level=logging.ERROR)
+        self.mensajes: List[str] = []
+
+    def emit(self, record):
+        try:
+            self.mensajes.append(record.getMessage())
+        except Exception:
+            pass
+
+
+INCIDENCIAS = CapturaErrores()
 
 
 def setup_logging(log_path: str = "tcg_watcher.log"):
@@ -257,6 +280,7 @@ def setup_logging(log_path: str = "tcg_watcher.log"):
         handlers=[
             logging.FileHandler(log_path, encoding="utf-8"),
             logging.StreamHandler(sys.stdout),
+            INCIDENCIAS,
         ],
     )
 
@@ -670,6 +694,7 @@ def articulos_shopify(fuente: dict) -> Tuple[List[dict], bool, int]:
 # --------------------------------------------------------------------------- #
 
 LIMITE_TELEGRAM = 3900   # el máximo real son 4096; se deja margen
+PAUSA_ENTRE_MENSAJES = 1.1   # segundos: límite de Telegram hacia un mismo chat
 
 
 def bandera(idioma: Optional[str]) -> str:
@@ -707,49 +732,169 @@ def enviar_mensaje(telegram: dict, texto: str, chat_id: Optional[str] = None) ->
         trozos.append(actual)
 
     for trozo in trozos:
-        try:
-            r = requests.post(
-                api,
-                data={"chat_id": destino, "text": trozo, "parse_mode": "HTML",
-                      "disable_web_page_preview": True},
-                timeout=REQUEST_TIMEOUT,
-            )
-            if r.status_code != 200:
-                logging.error("Error enviando a Telegram: %s", r.text[:300])
-                return False
-        except requests.RequestException as e:
-            logging.error("Excepción enviando a Telegram: %s", e)
+        if not _enviar_trozo(api, destino, trozo):
             return False
+        # Telegram admite en torno a un mensaje por segundo hacia un mismo
+        # chat. Como ahora se manda un aviso por producto, una tanda de altas
+        # se pasaría del límite y se perderían avisos.
+        time.sleep(PAUSA_ENTRE_MENSAJES)
     return True
 
 
+def _enviar_trozo(api: str, destino: str, texto: str, reintento: bool = True) -> bool:
+    try:
+        r = requests.post(
+            api,
+            data={"chat_id": destino, "text": texto, "parse_mode": "HTML",
+                  "disable_web_page_preview": True},
+            timeout=REQUEST_TIMEOUT,
+        )
+    except requests.RequestException as e:
+        logging.error("Excepción enviando a Telegram: %s", type(e).__name__)
+        return False
+
+    if r.status_code == 200:
+        return True
+
+    # 429 = demasiados mensajes seguidos. Telegram dice cuánto hay que esperar:
+    # se espera y se reintenta una vez, en vez de dar el aviso por perdido.
+    if r.status_code == 429 and reintento:
+        try:
+            espera = int(r.json().get("parameters", {}).get("retry_after", 3))
+        except ValueError:
+            espera = 3
+        logging.warning("Telegram pide esperar %d s antes de reenviar.", espera)
+        time.sleep(min(espera, 60) + 1)
+        return _enviar_trozo(api, destino, texto, reintento=False)
+
+    detalle = ""
+    try:
+        detalle = r.json().get("description", "")
+    except ValueError:
+        pass
+    logging.error("Telegram devolvió HTTP %s: %s", r.status_code, detalle)
+    return False
+
+
+
+# Título del aviso y etiqueta para el resumen diario, por tipo de cambio.
 ESTADOS = {
-    "nuevo":    ("🟢 Nuevo", "Nuevo ✅"),
-    "repuesto": ("🔄 Vuelve a estar disponible", "De nuevo disponible 🔄"),
-    "agotado":  ("🔴 Agotado", "Agotado ❌"),
+    "nuevo":    ("Se ha añadido un nuevo producto a", None),
+    "repuesto": ("Vuelve a estar disponible un producto de", "Volvió a estar disponible:"),
+    "agotado":  ("Se ha agotado un producto de", "Se agotó:"),
 }
 
 
-def bloque_aviso(art: dict) -> str:
-    """Bloque de un producto en un aviso: un dato por línea, sin apelotonar."""
-    lineas = [f"<b>{esc(art['titulo'])}</b>"]
-    if art.get("precio"):
-        lineas.append(f"💰 {esc(art['precio'])}")
-    if art.get("idioma"):
-        lineas.append(f"{bandera(art['idioma'])} Idioma: {esc(art['idioma'])}")
-    destino = enlace(art.get("product_url"))
+def bloque_producto(art) -> str:
+    """Estructura estándar de un producto, en tres líneas.
+
+    Es la misma en todas partes —altas, bajas, resumen diario y listado—, para
+    que el ojo reconozca el patrón sin leerlo entero:
+
+        🇯🇵 Nombre del producto
+        24,99 €
+        🔗 Pincha aquí
+    """
+    datos = dict(art)
+    lineas = [f"{bandera(datos.get('idioma'))} <b>{esc(datos['titulo'])}</b>",
+              esc(datos.get("precio") or "Precio no disponible")]
+    destino = enlace(datos.get("product_url"))
     if destino:
         lineas.append(destino)
     return "\n".join(lineas)
 
 
-def avisar_cambios(telegram: dict, tipo: str, tienda: str, categoria: str,
-                   emoji: str, articulos: List[dict]) -> bool:
-    """Un mensaje por tienda y tipo de cambio, en vez de uno por producto."""
+def avisar_cambio(telegram: dict, tipo: str, tienda: str, art: dict) -> bool:
+    """Un mensaje por producto.
+
+    Nunca se agrupan varios productos en un mismo mensaje, ni cuando la misma
+    ronda detecta varios cambios: cada aviso debe poder leerse y actuarse por
+    separado desde la notificación del móvil.
+    """
     titulo, _ = ESTADOS[tipo]
-    cabecera = f"{titulo}\n\n{emoji} <b>{esc(categoria)} — {esc(tienda)}</b>"
-    bloques = [bloque_aviso(art) for art in articulos]
-    return enviar_mensaje(telegram, cabecera + "\n\n" + "\n\n".join(bloques))
+    return enviar_mensaje(
+        telegram, f"{titulo} <b>{esc(tienda)}</b>\n\n{bloque_producto(art)}"
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Salud del servicio
+# --------------------------------------------------------------------------- #
+
+HORAS_LATIDO_POR_DEFECTO = 12
+MINUTOS_ENTRE_AVISOS_DE_ERROR = 60
+
+
+def _hace_mas_de(conn, clave: str, minutos: int) -> bool:
+    """¿Ha pasado ese tiempo desde la última vez que se marcó esa clave?"""
+    anterior = leer_estado(conn, clave)
+    if not anterior:
+        return True
+    try:
+        momento = datetime.fromisoformat(anterior)
+    except ValueError:
+        return True
+    return datetime.now(timezone.utc) - momento >= timedelta(minutes=minutos)
+
+
+def avisar_incidencias(telegram: dict, conn, errores: int) -> None:
+    """Avisa por Telegram de que algo va mal, y de cuándo se ha recuperado.
+
+    Se limita a un aviso por hora: si una tienda deja de responder, sin ese
+    freno llegarían 48 mensajes al día repitiendo lo mismo.
+    """
+    hubo_antes = leer_estado(conn, "hubo_errores") == "1"
+
+    if errores:
+        escribir_estado(conn, "hubo_errores", "1")
+        if not _hace_mas_de(conn, "ultimo_aviso_error", MINUTOS_ENTRE_AVISOS_DE_ERROR):
+            logging.info("Ya se avisó de un fallo hace menos de una hora; no se repite.")
+            return
+        detalle = "\n".join(f"· {esc(m[:200])}" for m in INCIDENCIAS.mensajes[:5])
+        extra = "" if len(INCIDENCIAS.mensajes) <= 5 else \
+            f"\n\n(y {len(INCIDENCIAS.mensajes) - 5} más)"
+        enviar_mensaje(
+            telegram,
+            "⚠️ <b>Problema en el vigilante</b>\n\n"
+            f"La última ronda terminó con {errores} error(es):\n\n{detalle}{extra}"
+            "\n\nRevisa los registros del repositorio."
+        )
+        escribir_estado(conn, "ultimo_aviso_error", ahora())
+        logging.info("Enviado el aviso de fallo por Telegram.")
+        return
+
+    escribir_estado(conn, "hubo_errores", "0")
+    if hubo_antes:
+        enviar_mensaje(telegram, "✅ <b>Todo vuelve a funcionar</b>\n\n"
+                                 "La última ronda ha terminado sin errores.")
+        logging.info("Enviado el aviso de recuperación.")
+        escribir_estado(conn, "ultimo_aviso_error", "")
+
+
+def latido(telegram: dict, conn, horas: int) -> None:
+    """Mensaje periódico de "sigo vivo".
+
+    Sin él, un scraper parado se parece demasiado a un scraper sin novedades.
+    """
+    if not _hace_mas_de(conn, "ultimo_latido", horas * 60):
+        return
+
+    filas = conn.execute(
+        "SELECT categoria, tienda, SUM(en_stock) s, COUNT(*) t"
+        " FROM articulos GROUP BY categoria, tienda ORDER BY categoria, tienda"
+    ).fetchall()
+    lineas = ["💚 <b>El vigilante sigue en marcha</b>", ""]
+    for f in filas:
+        lineas.append(f"{esc(f['categoria'])} — {esc(f['tienda'])}: "
+                      f"{f['s'] or 0} en stock de {f['t']}")
+    desde = leer_estado(conn, "ultimo_latido")
+    lineas.append("")
+    lineas.append(f"Sin novedades que avisar desde el último aviso."
+                  if desde else "Primer aviso de estado.")
+
+    if enviar_mensaje(telegram, "\n".join(lineas)):
+        escribir_estado(conn, "ultimo_latido", ahora())
+        logging.info("Enviado el aviso de estado del servicio.")
 
 
 # --------------------------------------------------------------------------- #
@@ -852,14 +997,13 @@ def run(telegram: dict, fuentes: List[dict], sembrar: bool = False) -> int:
         conn.commit()
 
         for tipo, lote in (("nuevo", nuevos), ("repuesto", repuestos), ("agotado", agotados)):
-            if not lote:
-                continue
-            if avisar_cambios(telegram, tipo, fuente["tienda"], fuente["categoria"],
-                              fuente["emoji"], lote):
-                logging.info("Avisado: %d %s en %s", len(lote), tipo, fuente["tienda"])
-            else:
-                logging.error("No se pudo avisar de %d %s en %s", len(lote), tipo, fuente["tienda"])
-                errores += 1
+            for art in lote:
+                if avisar_cambio(telegram, tipo, fuente["tienda"], art):
+                    logging.info("Avisado [%s] %s: %s", tipo, fuente["tienda"], art["titulo"])
+                else:
+                    logging.error("No se pudo avisar de %s: %s", tipo, art["titulo"])
+                    errores += 1
+
 
         time.sleep(random.uniform(*DELAY_BETWEEN_URLS))
 
@@ -871,10 +1015,15 @@ def run(telegram: dict, fuentes: List[dict], sembrar: bool = False) -> int:
         ).fetchone()["c"]
         logging.info("Ronda completada. %d artículos en stock ahora mismo.", total)
 
-    guardar_volcado(conn, fuentes[0]["db_path"])
-
     if errores:
         logging.error("La ronda terminó con %d error(es).", errores)
+
+    # Los mensajes de salud van al final, cuando ya se sabe cómo ha ido.
+    if not sembrar:
+        avisar_incidencias(telegram, conn, errores)
+        latido(telegram, conn, fuentes[0]["horas_latido"])
+
+    guardar_volcado(conn, fuentes[0]["db_path"])
     return errores
 
 
@@ -915,31 +1064,39 @@ def informe_diario(telegram: dict, fuentes: List[dict], forzar: bool = False) ->
     ))
 
     fecha_texto = local.strftime("%d/%m/%Y")
-    if not eventos:
-        texto = (f"📋 <b>Resumen del {fecha_texto}</b>\n\n"
-                 "Hoy no ha habido movimientos en ninguna de las tiendas vigiladas.")
-        logging.info("Informe diario: sin movimientos hoy.")
-        return 0 if enviar_mensaje(telegram, texto) else 1
-
     emojis = {f["categoria"]: f["emoji"] for f in fuentes}
 
-    # Agrupado por tienda dentro de cada categoría: así, al añadir categorías
-    # nuevas, el resumen sigue leyéndose sin convertirse en un muro de texto.
-    agrupado = {}
+    por_tienda = {}
     for ev in eventos:
-        agrupado.setdefault((ev["categoria"], ev["tienda"]), []).append(ev)
+        por_tienda.setdefault((ev["categoria"], ev["tienda"]), []).append(ev)
 
+    # Se recorren las tiendas configuradas, no solo las que tuvieron
+    # movimientos: si una no ha añadido nada, hay que decirlo. "Sin mensaje"
+    # sería ambiguo — no distinguiría entre no hubo altas y el scraper falló.
     secciones = []
-    for (categoria, tienda), lote in agrupado.items():
-        emoji = emojis.get(categoria, EMOJI_CATEGORIA_POR_DEFECTO)
-        bloques = [f"{emoji} <b>{esc(categoria)} — {esc(tienda)}</b>"]
-        for ev in lote:
+    vistas = []
+    for fuente in fuentes:
+        clave = (fuente["categoria"], fuente["tienda"])
+        if clave in vistas:
+            continue
+        vistas.append(clave)
+
+        emoji = emojis.get(fuente["categoria"], EMOJI_CATEGORIA_POR_DEFECTO)
+        bloques = [f"{emoji} <b>{esc(fuente['categoria'])} — {esc(fuente['tienda'])}</b>"]
+
+        lote = por_tienda.get(clave, [])
+        altas = [e for e in lote if e["tipo"] == "nuevo"]
+        otros = [e for e in lote if e["tipo"] != "nuevo"]
+
+        if altas:
+            bloques.extend(bloque_producto(ev) for ev in altas)
+        else:
+            bloques.append("No se ha añadido ningún producto")
+
+        for ev in otros:
             _, etiqueta = ESTADOS.get(ev["tipo"], ("", ev["tipo"]))
-            partes = [f"<b>{esc(ev['titulo'])}</b>", etiqueta]
-            destino = enlace(ev["product_url"])
-            if destino:
-                partes.append(destino)
-            bloques.append("\n".join(partes))
+            bloques.append(f"{etiqueta}\n{bloque_producto(ev)}")
+
         secciones.append("\n\n".join(bloques))
 
     en_stock = conn.execute("SELECT COUNT(*) c FROM articulos WHERE en_stock=1").fetchone()["c"]
@@ -995,31 +1152,18 @@ def texto_stock(conn, filtro: Optional[str], emojis: Optional[dict] = None) -> s
                     f"Tiendas vigiladas: {', '.join(tiendas) or '—'}")
         return "Ahora mismo no hay ningún producto en stock."
 
-    lineas = []
+    bloques = []
     grupo_actual = None
     for fila in filas:
         grupo = (fila["categoria"], fila["tienda"])
         if grupo != grupo_actual:
             grupo_actual = grupo
             emoji = emojis.get(fila["categoria"], EMOJI_CATEGORIA_POR_DEFECTO)
-            if lineas:
-                lineas.append("")
-            lineas.append(f"{emoji} <b>{esc(fila['categoria'])} — {esc(fila['tienda'])}</b>")
-            lineas.append("")
+            bloques.append(f"{emoji} <b>{esc(fila['categoria'])} — {esc(fila['tienda'])}</b>")
+        bloques.append(bloque_producto(fila))
 
-        # La bandera va delante para poder barrer el listado por idioma de un
-        # vistazo, sin leer cada línea entera.
-        partes = [f"<b>{esc(fila['titulo'])}</b>"]
-        if fila["precio"]:
-            partes.append(esc(fila["precio"]))
-        destino = enlace(fila["product_url"])
-        if destino:
-            partes.append(destino)
-        lineas.append(f"{bandera(fila['idioma'])} " + " — ".join(partes))
-        lineas.append("")
-
-    lineas.append(f"Total: {len(filas)} artículos en stock.")
-    return "\n".join(lineas).strip()
+    bloques.append(f"Total: {len(filas)} artículos en stock.")
+    return "\n\n".join(bloques)
 
 
 
@@ -1368,7 +1512,21 @@ def main():
     if args.comandos:
         sys.exit(1 if atender_comandos(telegram, fuentes) else 0)
 
-    sys.exit(1 if run(telegram, fuentes, sembrar=args.seed) else 0)
+    try:
+        sys.exit(1 if run(telegram, fuentes, sembrar=args.seed) else 0)
+    except SystemExit:
+        raise
+    except Exception as e:
+        # Una excepción no controlada dejaría el vigilante mudo sin que nadie
+        # se entere, así que se avisa por Telegram antes de caer.
+        logging.exception("Fallo no controlado durante la ronda")
+        enviar_mensaje(
+            telegram,
+            "🛑 <b>El vigilante ha fallado</b>\n\n"
+            f"Error no controlado: {esc(type(e).__name__)}: {esc(str(e)[:300])}"
+            "\n\nHay que revisar el código."
+        )
+        sys.exit(1)
 
 
 if __name__ == "__main__":

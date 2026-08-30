@@ -19,36 +19,60 @@ de comprar.
 | Cada día a las 20:00 (España) | Resumen de los movimientos del día, o "hoy no ha habido movimientos" |
 | Cada 5 min | Atiende los comandos que le escribas por Telegram |
 
-### Avisos
+### Estructura estándar de producto
 
-Se agrupan por tienda y tipo de cambio, para no recibir veinte mensajes
-seguidos. Un dato por línea:
+Un producto se muestra **siempre igual**, en tres líneas, se enseñe donde se
+enseñe (alta, baja, resumen diario o listado):
 
 ```
-🔴 Agotado
-
-🏴‍☠️ One Piece — Flash Store
-
-One Piece Base Shop Vol.2
-💰 66,90 €
-🇯🇵 Idioma: Japonés
+🇯🇵 Nombre del producto
+24,99 €
 🔗 Pincha aquí
 ```
 
-Los tres tipos: `🟢 Nuevo`, `🔴 Agotado` y `🔄 Vuelve a estar disponible`.
+Bandera del idioma + nombre, precio, y enlace corto. Así el ojo reconoce el
+patrón sin leer el mensaje entero.
 
-El emoji de cada categoría se configura en `fuentes.json`:
+### Avisos
 
-```json
-"emojis_categoria": { "One Piece": "🏴‍☠️" }
+**Un mensaje por producto, siempre.** Aunque una misma ronda detecte diez
+cambios, salen diez mensajes: cada aviso tiene que poder leerse y actuarse por
+separado desde la notificación del móvil.
+
+```
+Se ha añadido un nuevo producto a Flash Store
+
+🇯🇵 One Piece Base Shop Vol.2
+66,90 €
+🔗 Pincha aquí
 ```
 
-Y el idioma se muestra con su bandera (`🇯🇵`, `🇬🇧`, `🇪🇸`...). Los artículos
-sin idioma conocido salen con `❔`.
+Los tres tipos de aviso:
 
-> El tercero no estaba en la especificación, pero sin él una reposición pasaría
-> **en silencio**: el producto ya se conoce, así que no sería "nuevo", y sin un
-> aviso propio no te enterarías de que ha vuelto.
+| Tipo | Título |
+|---|---|
+| Alta | `Se ha añadido un nuevo producto a **Tienda**` |
+| Baja | `Se ha agotado un producto de **Tienda**` |
+| Reposición | `Vuelve a estar disponible un producto de **Tienda**` |
+
+Entre mensajes se espera algo más de un segundo, porque Telegram limita los
+envíos hacia un mismo chat. Si aun así responde `429`, se espera lo que él
+indique y se reintenta: un aviso perdido es un aviso que no existe.
+
+### Mensajes de estado del servicio
+
+Un vigilante roto se parece demasiado a un vigilante sin novedades, así que el
+bot también informa de sí mismo:
+
+| Mensaje | Cuándo |
+|---|---|
+| 💚 Sigue en marcha | Cada `horas_latido` horas (12 por defecto), con el recuento en stock |
+| ⚠️ Problema en el vigilante | Cuando una ronda acaba con errores, **como mucho una vez por hora** |
+| ✅ Todo vuelve a funcionar | En la primera ronda limpia tras un fallo |
+| 🛑 El vigilante ha fallado | Ante una excepción no controlada |
+
+El freno de una hora en los avisos de error es deliberado: si una tienda deja
+de responder, sin él llegarían 48 mensajes al día repitiendo lo mismo.
 
 ### Comandos de Telegram
 
@@ -60,14 +84,9 @@ sin idioma conocido salen con `❔`.
 | `/resumen` | Los movimientos de hoy, sin esperar a las 20:00 |
 | `/ayuda` | La lista de comandos |
 
-El listado pone **la bandera del idioma al principio de cada línea**, para
-poder barrerlo de un vistazo:
-
-```
-🇯🇵 Producto X — 24,99 € — 🔗 Pincha aquí
-
-🇪🇸 Producto Y — 19,99 € — 🔗 Pincha aquí
-```
+El listado usa la estructura estándar de tres líneas. Con 141 artículos, un
+`/stock` completo son unos **7 mensajes**; `/stock flashstore` son 2. Para
+consultar a diario, filtrar por tienda es más cómodo.
 
 **El menú que Telegram sugiere al escribir `/`** se publica desde el código,
 no desde BotFather:
@@ -277,6 +296,11 @@ estado y dos a la vez darían un conflicto.
 | `vigilancia.yml` | `*/30 * * * *` | La ronda de vigilancia |
 | `comandos.yml` | `*/5 * * * *` | Responde a los comandos |
 | `informe.yml` | `0 18,19 * * *` | El resumen diario |
+
+El resumen recorre **todas las tiendas configuradas**, no solo las que
+tuvieron movimientos: si una no ha añadido nada, lo dice explícitamente
+("No se ha añadido ningún producto"). El silencio sería ambiguo — no
+distinguiría entre "no hubo altas" y "el scraper falló".
 
 El informe se dispara **a dos horas** porque 20:00 en España son las 18:00 UTC
 en verano y las 19:00 en invierno; el script comprueba la hora local y descarta
