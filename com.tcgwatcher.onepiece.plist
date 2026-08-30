@@ -5,24 +5,19 @@
     <!-- Sustituye /RUTA/A/tcg-watcher por la ruta real antes de instalarlo -->
     <key>Label</key>
     <string>com.tcgwatcher.onepiece</string>
-
     <key>ProgramArguments</key>
     <array>
         <string>/RUTA/A/tcg-watcher/venv/bin/python3</string>
         <string>/RUTA/A/tcg-watcher/scraper.py</string>
-        <string>/RUTA/A/tcg-watcher/config_one_piece.json</string>
+        
     </array>
-
     <key>WorkingDirectory</key>
     <string>/RUTA/A/tcg-watcher</string>
-
     <!-- Cada 600 segundos = 10 minutos -->
     <key>StartInterval</key>
     <integer>600</integer>
-
     <key>RunAtLoad</key>
     <true/>
-
     <key>StandardOutPath</key>
     <string>/RUTA/A/tcg-watcher/launchd_onepiece.out.log</string>
     <key>StandardErrorPath</key>

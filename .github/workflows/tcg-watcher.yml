@@ -34,13 +34,8 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
-          fallo=0
-          for cfg in config_*.json; do
-            echo "::group::$cfg"
-            python scraper.py "$cfg" || { echo "❌ Falló $cfg"; fallo=1; }
-            echo "::endgroup::"
-          done
-          echo "FALLO=$fallo" >> "$GITHUB_ENV"
+          python scraper.py --listar
+          python scraper.py || echo "FALLO=1" >> "$GITHUB_ENV"
 
       - name: Guardar productos ya vistos
         if: always()

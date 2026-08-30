@@ -22,10 +22,11 @@ import random
 import re
 import sqlite3
 import sys
+import unicodedata
 import time
 from pathlib import Path
 from typing import List, Optional
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 import requests
 from bs4 import BeautifulSoup
@@ -110,50 +111,126 @@ def expand_env(value):
     return re.sub(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}", repl, value)
 
 
-def load_config(path: str) -> dict:
+def slug(texto: str) -> str:
+    """Convierte "Pokémon" en "pokemon", para nombrar ficheros sin sorpresas."""
+    sin_tildes = unicodedata.normalize("NFKD", texto)
+    sin_tildes = "".join(c for c in sin_tildes if not unicodedata.combining(c))
+    return re.sub(r"[^a-z0-9]+", "_", sin_tildes.lower()).strip("_")
+
+
+def derivar_tienda(url: str, nombres: dict) -> str:
+    """Deduce el nombre de la tienda a partir del dominio.
+
+    De 'flashstore.es' no hay forma fiable de sacar "Flash Store" —partir la
+    palabra en dos requeriría un diccionario y fallaría tanto como acertaría—,
+    así que se devuelve 'Flashstore' y el mapa 'nombres_tienda' de la config
+    permite corregirlo de una vez para todas las URLs de ese dominio.
+    """
+    dominio = urlparse(url).netloc.split(":")[0].lower()
+    if dominio.startswith("www."):
+        dominio = dominio[4:]
+
+    if dominio in nombres:
+        return nombres[dominio]
+
+    # Dominios de dos niveles (.co.uk, .com.es...): si nos quedáramos con la
+    # penúltima parte, "shop.mitienda.co.uk" daría la tienda "Co".
+    SUFIJOS_COMPUESTOS = {"co", "com", "org", "net", "gov", "edu", "ac", "nom"}
+    partes = dominio.split(".")
+    if len(partes) >= 3 and partes[-2] in SUFIJOS_COMPUESTOS:
+        etiqueta = partes[-3]
+    elif len(partes) >= 2:
+        etiqueta = partes[-2]
+    else:
+        etiqueta = dominio
+    if etiqueta in nombres:
+        return nombres[etiqueta]
+    return etiqueta.replace("-", " ").replace("_", " ").title()
+
+
+def load_fuentes(path: str) -> List[dict]:
+    """Lee el fichero de fuentes y lo agrupa en una configuración por categoría.
+
+    El fichero es una lista plana de URLs: cada una declara a qué categoría
+    pertenece y, opcionalmente, a qué tienda. No se impone ninguna jerarquía
+    tienda→categoría porque no existe: una tienda puede tener varias URLs de
+    una misma categoría, y varias categorías distintas, y eso cambia con el
+    tiempo. Aquí se agrupan por categoría, que es la unidad de aviso y de
+    memoria de "ya visto".
+    """
     load_dotenv()
 
     with open(path, "r", encoding="utf-8") as f:
-        cfg = json.load(f)
+        raiz = json.load(f)
 
-    required = ["categoria", "urls", "telegram"]
-    for key in required:
-        if key not in cfg:
-            raise ValueError(f"Falta la clave obligatoria '{key}' en {path}")
-    if "bot_token" not in cfg["telegram"] or "chat_id" not in cfg["telegram"]:
+    if "fuentes" not in raiz:
+        raise ValueError(f"Falta la lista 'fuentes' en {path}")
+    if "telegram" not in raiz:
+        raise ValueError(f"Falta la sección 'telegram' en {path}")
+    if "bot_token" not in raiz["telegram"] or "chat_id" not in raiz["telegram"]:
         raise ValueError("La sección 'telegram' necesita 'bot_token' y 'chat_id'")
-    cfg["telegram"] = {k: expand_env(v) for k, v in cfg["telegram"].items()}
 
-    cfg.setdefault("db_path", f"seen_{cfg['categoria']}.db")
-    cfg.setdefault("log_path", f"log_{cfg['categoria']}.log")
-    # Páginas de cada categoría a revisar en cada pasada. Las tiendas ordenan
-    # por novedad, así que con las primeras basta para el día a día; en la
-    # siembra inicial se recorre el catálogo entero para tener base completa.
-    cfg.setdefault("max_pages", 3)
-    cfg.setdefault("seed_max_pages", 50)
+    telegram = {k: expand_env(v) for k, v in raiz["telegram"].items()}
+    nombres = {k.lower(): v for k, v in raiz.get("nombres_tienda", {}).items()}
 
-    # Selectores: por defecto los de WooCommerce, con lo que ponga la config
-    # encima. Cada URL puede a su vez sobreescribir los suyos, para poder
-    # vigilar en una misma categoría tiendas con plantillas distintas.
-    base_selectors = dict(DEFAULT_SELECTORS)
-    base_selectors.update(cfg.get("selectors", {}))
-    cfg["selectors"] = base_selectors
+    selectores_base = dict(DEFAULT_SELECTORS)
+    selectores_base.update(raiz.get("selectors", {}))
+    max_pages_base = raiz.get("max_pages", 3)
+    seed_pages_base = raiz.get("seed_max_pages", 50)
 
-    fuentes = []
-    for entry in cfg["urls"]:
-        if isinstance(entry, str):
-            fuentes.append({"url": entry, "selectors": base_selectors})
-        elif isinstance(entry, dict) and "url" in entry:
-            propios = dict(base_selectors)
-            propios.update(entry.get("selectors", {}))
-            fuentes.append({"url": entry["url"], "selectors": propios})
-        else:
+    por_categoria = {}
+    urls_vistas = {}
+
+    for i, entrada in enumerate(raiz["fuentes"], start=1):
+        if not isinstance(entrada, dict):
             raise ValueError(
-                f"Entrada inválida en 'urls': {entry!r}. "
-                'Debe ser una URL o un objeto {"url": "...", "selectors": {...}}'
+                f"La fuente #{i} de {path} debe ser un objeto "
+                '{"url": "...", "categoria": "..."}, no ' + repr(entrada)
             )
-    cfg["urls"] = fuentes
-    return cfg
+        url = entrada.get("url")
+        categoria = entrada.get("categoria")
+        if not url or not categoria:
+            raise ValueError(
+                f'La fuente #{i} de {path} necesita "url" y "categoria". Tiene: {entrada!r}'
+            )
+        if not str(url).startswith(("http://", "https://")):
+            raise ValueError(f"La fuente #{i} de {path} no es una URL válida: {url!r}")
+
+        if url in urls_vistas:
+            raise ValueError(
+                f"La URL {url} está repetida en {path} "
+                f"(fuentes #{urls_vistas[url]} y #{i}). Bórrala de una de las dos."
+            )
+        urls_vistas[url] = i
+
+        selectores = dict(selectores_base)
+        selectores.update(entrada.get("selectors", {}))
+
+        cfg = por_categoria.setdefault(
+            categoria,
+            {
+                "categoria": categoria,
+                "urls": [],
+                "telegram": telegram,
+                "db_path": f"seen_{slug(categoria)}.db",
+                "max_pages": max_pages_base,
+                "seed_max_pages": seed_pages_base,
+            },
+        )
+        cfg["urls"].append(
+            {
+                "url": url,
+                "selectors": selectores,
+                "tienda": entrada.get("tienda") or derivar_tienda(url, nombres),
+                "max_pages": entrada.get("max_pages", max_pages_base),
+                "seed_max_pages": entrada.get("seed_max_pages", seed_pages_base),
+            }
+        )
+
+    if not por_categoria:
+        raise ValueError(f"La lista 'fuentes' de {path} está vacía.")
+
+    return list(por_categoria.values())
 
 
 def setup_logging(log_path: str):
@@ -584,17 +661,21 @@ def run(cfg: dict, force_seed: bool = False) -> int:
     seed_mode = force_seed or is_first_run(conn)
     if seed_mode:
         logging.info(
-            "Primera ejecución para '%s': se guardan los productos actuales SIN notificar.",
+            "Siembra de '%s': se guardan los productos actuales SIN notificar.",
             cfg["categoria"],
         )
 
-    max_pages = cfg["seed_max_pages"] if seed_mode else cfg["max_pages"]
     total_new = 0
     errores = 0
 
     for fuente in cfg["urls"]:
         source_url = fuente["url"]
         selectors = fuente["selectors"]
+        tienda = fuente["tienda"]
+        # El aviso identifica la tienda además de la categoría: la misma carta
+        # puede aparecer en varias tiendas y son compras distintas.
+        etiqueta = f"{cfg['categoria']} · {tienda}"
+        max_pages = fuente["seed_max_pages"] if seed_mode else fuente["max_pages"]
 
         try:
             html = fetch_html(source_url)
@@ -635,7 +716,7 @@ def run(cfg: dict, force_seed: bool = False) -> int:
                         cfg["telegram"]["bot_token"],
                         cfg["telegram"]["chat_id"],
                         product,
-                        cfg["categoria"],
+                        etiqueta,
                     )
                     if not enviado:
                         # No se marca como visto: así se reintenta en la
@@ -643,7 +724,7 @@ def run(cfg: dict, force_seed: bool = False) -> int:
                         logging.error("Aviso NO enviado, se reintentará: %s", product["title"])
                         errores += 1
                         continue
-                    logging.info("Nuevo producto notificado: %s", product["title"])
+                    logging.info("Nuevo producto notificado: [%s] %s", tienda, product["title"])
                     total_new += 1
 
                 mark_seen(
@@ -666,42 +747,109 @@ def run(cfg: dict, force_seed: bool = False) -> int:
     return errores
 
 
+FUENTES_POR_DEFECTO = "fuentes.json"
+
+
+def mostrar_fuentes(path: str, categorias: List[dict]) -> int:
+    """Dice dónde está el fichero de fuentes y cómo añadir entradas nuevas."""
+    ruta = Path(path).resolve()
+    total = sum(len(c["urls"]) for c in categorias)
+    print(f"\n📄 Fichero de fuentes: {ruta}")
+    print(f"   {total} URL(s) vigiladas en {len(categorias)} categoría(s)\n")
+
+    for cfg in sorted(categorias, key=lambda c: c["categoria"]):
+        print(f"   {cfg['categoria']}   →  {cfg['db_path']}")
+        por_tienda = {}
+        for fuente in cfg["urls"]:
+            por_tienda.setdefault(fuente["tienda"], []).append(fuente["url"])
+        for tienda, urls in sorted(por_tienda.items()):
+            print(f"     {tienda}")
+            for url in urls:
+                print(f"       · {url}")
+        print()
+
+    print("   Para añadir una URL, edita el fichero y mete una entrada en \"fuentes\":")
+    print('     { "url": "https://latienda.es/cat/pokemon", "categoria": "Pokémon" }')
+    print("\n   La tienda se deduce del dominio. Para forzar otro nombre:")
+    print('     · para todas sus URLs:  "nombres_tienda": { "latienda.es": "La Tienda" }')
+    print('     · solo para una URL:    añade "tienda": "La Tienda" a la entrada')
+    print("\n   Antes de añadirla, compruébala:")
+    print(f'     python3 scraper.py --check "https://latienda.es/cat/pokemon"')
+    print("   Y después de añadirla, siembra para no recibir todo su catálogo de golpe:")
+    print(f"     python3 scraper.py --seed\n")
+    return 0
+
+
 def main():
-    parser = argparse.ArgumentParser(description="TCG Watcher - scraping de categorías WooCommerce")
+    parser = argparse.ArgumentParser(
+        description="TCG Watcher - vigila categorías de tiendas y avisa por Telegram"
+    )
     parser.add_argument(
-        "config",
+        "fuentes",
         nargs="?",
-        help="Ruta al fichero de configuración JSON de la categoría",
+        default=FUENTES_POR_DEFECTO,
+        help=f"Fichero de fuentes (por defecto: {FUENTES_POR_DEFECTO})",
+    )
+    parser.add_argument(
+        "--categoria",
+        metavar="NOMBRE",
+        help="Procesa solo esa categoría en vez de todas.",
     )
     parser.add_argument(
         "--check",
         metavar="URL",
-        help="Analiza una URL de categoría y dice si el scraper la entiende, "
-             "sin tocar la base de datos ni enviar nada. Úsalo antes de añadir "
-             "una tienda nueva a una config.",
+        help="Analiza una URL y dice si el scraper la entiende, sin tocar la "
+             "base de datos ni enviar nada. Úsalo antes de añadir una tienda nueva.",
     )
     parser.add_argument(
         "--seed",
         action="store_true",
         help="Fuerza el modo siembra: guarda todo lo que encuentre SIN notificar. "
-             "Úsalo al añadir tiendas o URLs nuevas a una categoría ya en marcha.",
+             "Úsalo al añadir tiendas o URLs nuevas.",
+    )
+    parser.add_argument(
+        "--listar",
+        action="store_true",
+        help="Muestra dónde está el fichero de fuentes, qué vigila y cómo añadir más.",
     )
     args = parser.parse_args()
 
     if args.check:
-        # Si se pasa también una config, se usan SUS selectores, para poder
-        # comprobar los ajustes de una tienda concreta antes de fiarse de ellos.
-        selectors = DEFAULT_SELECTORS
-        if args.config:
-            selectors = load_config(args.config)["selectors"]
-        sys.exit(diagnosticar(args.check, selectors))
+        # --check no necesita fichero de fuentes; si existe, se usan sus
+        # selectores, para poder validar los ajustes de una tienda concreta.
+        selectores = DEFAULT_SELECTORS
+        if Path(args.fuentes).is_file():
+            categorias = load_fuentes(args.fuentes)
+            for cfg in categorias:
+                for fuente in cfg["urls"]:
+                    if fuente["url"] == args.check:
+                        selectores = fuente["selectors"]
+        sys.exit(diagnosticar(args.check, selectores))
 
-    if not args.config:
-        parser.error("Indica un fichero de configuración, o usa --check URL para analizar una tienda.")
+    if not Path(args.fuentes).is_file():
+        parser.error(
+            f"No encuentro el fichero de fuentes '{args.fuentes}'. "
+            "Créalo (ver README) o indica su ruta como primer argumento."
+        )
 
-    cfg = load_config(args.config)
-    setup_logging(cfg["log_path"])
-    sys.exit(1 if run(cfg, force_seed=args.seed) else 0)
+    categorias = load_fuentes(args.fuentes)
+
+    if args.listar:
+        sys.exit(mostrar_fuentes(args.fuentes, categorias))
+
+    if args.categoria:
+        elegidas = [c for c in categorias if slug(c["categoria"]) == slug(args.categoria)]
+        if not elegidas:
+            disponibles = ", ".join(sorted(c["categoria"] for c in categorias))
+            parser.error(f"No hay ninguna categoría '{args.categoria}'. Hay: {disponibles}")
+        categorias = elegidas
+
+    setup_logging("tcg_watcher.log")
+
+    errores = 0
+    for cfg in categorias:
+        errores += run(cfg, force_seed=args.seed)
+    sys.exit(1 if errores else 0)
 
 
 if __name__ == "__main__":
