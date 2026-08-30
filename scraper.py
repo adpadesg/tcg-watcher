@@ -116,10 +116,15 @@ def expand_env(valor):
     def repl(match):
         nombre = match.group(1)
         resuelto = os.environ.get(nombre)
-        if resuelto is None:
+        # Una variable vacía se trata como ausente: si un secret no existe,
+        # GitHub Actions no da error, pone la variable a cadena vacía. Sin
+        # esta comprobación el token vacío llegaría hasta la API de Telegram
+        # y el fallo aparecería mucho más tarde y sin explicación.
+        if not resuelto:
             raise ValueError(
-                f"La variable de entorno '{nombre}' no está definida. "
-                "Defínela en .env (local) o como secret del repo (GitHub Actions)."
+                f"La variable de entorno '{nombre}' no está definida o está vacía. "
+                "Defínela en .env (local) o como secret del repositorio "
+                "(Settings > Secrets and variables > Actions)."
             )
         return resuelto
 
