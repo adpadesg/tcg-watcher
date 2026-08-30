@@ -448,9 +448,15 @@ def find_page_urls(html: str, source_url: str, max_pages: int,
             last = max(last, int(m.group(1)))
 
     last = min(last, max_pages)
-    base = source_url.split("?")[0].rstrip("/")
-    base = re.sub(r"/page/\d+$", "", base)
-    return [f"{base}/page/{n}/" for n in range(2, last + 1)]
+
+    # La query se conserva: si la URL lleva un filtro de la tienda
+    # (?stock_status=instock y similares), perderlo al paginar traería
+    # productos que el filtro excluía, y se notificarían como novedades.
+    partes = urlparse(source_url)
+    ruta = re.sub(r"/page/\d+$", "", partes.path.rstrip("/"))
+    cola = f"?{partes.query}" if partes.query else ""
+    base = f"{partes.scheme}://{partes.netloc}{ruta}"
+    return [f"{base}/page/{n}/{cola}" for n in range(2, last + 1)]
 
 
 # --------------------------------------------------------------------------- #

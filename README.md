@@ -252,7 +252,9 @@ El workflow está en `.github/workflows/tcg-watcher.yml` y corre cada 10 minutos
   con URL falla con `failed to get HTTP URL content`. Si aun así falla, hay
   fallback a mensaje de texto.
 - **Paginación**: se lee el paginador y se recorren las páginas `/page/N/`
-  hasta `max_pages`.
+  hasta `max_pages`, **conservando la query** de la URL. Si la URL lleva un
+  filtro de la tienda (`?stock_status=instock`), perderlo al paginar traería
+  productos que el filtro excluía y se notificarían como novedades.
 - **Fallos ruidosos**: el scraper termina con código 1 —y el workflow se pone
   en rojo, con aviso por correo— si una URL no se descarga, si una página
   devuelve 0 productos (señal de que la tienda cambió su HTML) o si Telegram

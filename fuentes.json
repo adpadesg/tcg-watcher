@@ -12,7 +12,7 @@
   "seed_max_pages": 70,
   "fuentes": [
     {
-      "url": "https://flashstore.es/categoria/one-piece/",
+      "url": "https://flashstore.es/categoria/one-piece/?stock_status=instock",
       "categoria": "One Piece"
     },
     {
