@@ -57,6 +57,17 @@ Una entrada con dos datos. Todo lo demás es opcional:
   cuál viene: `🆕 [One Piece · Flash Store] ...`
 - **La tienda se deduce del dominio** (`flashstore.es` → `Flashstore`).
 
+> **Norma del proyecto: todas las URLs van filtradas por stock.** Solo interesan
+> los productos que se pueden comprar. Cada plataforma lo hace a su manera:
+>
+> | Plataforma | Cómo |
+> |---|---|
+> | WooCommerce | `?stock_status=instock` en la URL |
+> | Shopify | `"solo_disponibles": true` en la entrada (la API no aplica el filtro de la URL) |
+>
+> Al paginar se conserva la query, así que el filtro sigue aplicándose en las
+> páginas 2, 3...
+
 ### Forzar el nombre de una tienda
 
 De un dominio no siempre se puede sacar un nombre bonito: partir `flashstore` en
