@@ -74,6 +74,61 @@ Edita `config_one_piece.json` o duplícalo para una tienda/categoría nueva:
 - Conviene apuntar a la **categoría padre** (ej. `/categoria/pokemon/`) en vez
   de a varias subcategorías: cubre todo lo nuevo con una sola URL.
 
+## 4b. Añadir una tienda nueva
+
+Antes de tocar ninguna config, **analiza la URL**. Este modo no toca la base de
+datos ni envía nada: solo dice si el scraper entiende esa tienda.
+
+```bash
+python3 scraper.py --check "https://latienda.es/categoria/pokemon/"
+```
+
+Te dirá la plataforma detectada, cuántos productos reconoce, cuántas páginas
+tiene y una muestra de título/precio/imagen. Dos posibles finales:
+
+- **✅ "Esta URL se puede añadir tal cual"** → mete la URL en `urls` y ejecuta
+  con `--seed`.
+- **❌ "El scraper NO entiende esta tienda"** → te propondrá los contenedores de
+  producto que ha encontrado en el HTML, para que los pongas en `selectors`.
+
+### Tiendas con otra plantilla
+
+Los selectores por defecto son los de WooCommerce. Si una tienda usa otra cosa,
+se ajustan **sin tocar Python**, en la propia config:
+
+```json
+{
+  "urls": [
+    "https://flashstore.es/categoria/one-piece/",
+    {
+      "url": "https://otratienda.es/coleccion/one-piece",
+      "selectors": {
+        "container": ".ficha-articulo",
+        "link": ["h4 a", "a[href]"],
+        "price": [".importe"]
+      }
+    }
+  ]
+}
+```
+
+- Una entrada de `urls` puede ser una URL suelta (usa los selectores por
+  defecto) **o** un objeto con sus propios `selectors`, así que una misma
+  categoría puede vigilar varias tiendas con plantillas distintas.
+- Un bloque `selectors` en la raíz de la config cambia el valor por defecto
+  para todas sus URLs.
+- Las listas (`link`, `title`, `price`) se prueban **en orden**: gana el primer
+  selector que encuentre algo. Así un selector fiable manda sobre el genérico.
+- `skip_classes` descarta contenedores: por defecto `product-category`, que es
+  como WooCommerce marca las subcategorías.
+
+Después de añadir la URL, **siembra** para no recibir de golpe todo el catálogo
+de la tienda nueva:
+
+```bash
+python3 scraper.py config_one_piece.json --seed
+```
+
 ## 5. Probar a mano
 
 ```bash

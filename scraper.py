@@ -39,6 +39,37 @@ REQUEST_TIMEOUT = 20
 DELAY_BETWEEN_URLS = (2, 5)  # segundos, con jitter, para no machacar la web
 
 
+# Selectores por defecto: WooCommerce estándar (la mayoría de tiendas de cartas).
+# Cada config puede sobreescribir los que necesite en su bloque "selectors",
+# y cada URL puede además llevar los suyos propios si esa tienda usa otra
+# plantilla. Las listas se prueban en orden: gana la primera que encuentre algo.
+DEFAULT_SELECTORS = {
+    "container": "li.product, .products .product, .product-grid-item",
+    # Contenedores a descartar: WooCommerce marca las subcategorías del
+    # catálogo con la clase "product", pero no son productos.
+    "skip_classes": ["product-category", "product-cat"],
+    "link": [
+        "h2 a",
+        "h3 a",
+        ".woocommerce-loop-product__title a",
+        "a.woocommerce-LoopProduct-link",
+        "a.wd-product-img-link",
+        "a[href*='/producto/']",
+        "a[href*='/product/']",
+        "a[href]",
+    ],
+    "title": [
+        ".wd-entities-title",
+        ".woocommerce-loop-product__title",
+        ".product-title",
+        "h2",
+        "h3",
+    ],
+    "price": [".price", ".product-price", ".amount"],
+    "pagination": ".woocommerce-pagination a, nav.pagination a, .page-numbers a",
+}
+
+
 # --------------------------------------------------------------------------- #
 # Configuración y logging
 # --------------------------------------------------------------------------- #
@@ -100,6 +131,28 @@ def load_config(path: str) -> dict:
     # siembra inicial se recorre el catálogo entero para tener base completa.
     cfg.setdefault("max_pages", 3)
     cfg.setdefault("seed_max_pages", 50)
+
+    # Selectores: por defecto los de WooCommerce, con lo que ponga la config
+    # encima. Cada URL puede a su vez sobreescribir los suyos, para poder
+    # vigilar en una misma categoría tiendas con plantillas distintas.
+    base_selectors = dict(DEFAULT_SELECTORS)
+    base_selectors.update(cfg.get("selectors", {}))
+    cfg["selectors"] = base_selectors
+
+    fuentes = []
+    for entry in cfg["urls"]:
+        if isinstance(entry, str):
+            fuentes.append({"url": entry, "selectors": base_selectors})
+        elif isinstance(entry, dict) and "url" in entry:
+            propios = dict(base_selectors)
+            propios.update(entry.get("selectors", {}))
+            fuentes.append({"url": entry["url"], "selectors": propios})
+        else:
+            raise ValueError(
+                f"Entrada inválida en 'urls': {entry!r}. "
+                'Debe ser una URL o un objeto {"url": "...", "selectors": {...}}'
+            )
+    cfg["urls"] = fuentes
     return cfg
 
 
@@ -221,31 +274,36 @@ def _first_from_srcset(srcset: Optional[str]) -> Optional[str]:
     return srcset.split(",")[0].strip().split(" ")[0]
 
 
-def parse_products(html: str, source_url: str) -> List[dict]:
+def _first_match(container, selectors: List[str]):
+    """Devuelve el primer elemento que encuentre alguno de los selectores.
+
+    Se prueban en orden de prioridad (no en orden del documento), para que un
+    selector específico y fiable gane a uno genérico de último recurso.
+    """
+    for selector in selectors:
+        try:
+            found = container.select_one(selector)
+        except Exception:
+            logging.warning("Selector inválido, se ignora: %s", selector)
+            continue
+        if found:
+            return found
+    return None
+
+
+def parse_products(html: str, source_url: str, selectors: Optional[dict] = None) -> List[dict]:
+    selectors = selectors or DEFAULT_SELECTORS
     soup = BeautifulSoup(html, "html.parser")
 
-    containers = soup.select("li.product") + soup.select(".products .product")
     products = []
     seen_urls = set()
+    skip_classes = set(selectors.get("skip_classes", []))
 
-    for container in containers:
-        classes = container.get("class") or []
-        # Las subcategorías del catálogo también llevan la clase "product"
-        # (WooCommerce las marca como product-category). No son productos.
-        if "product-category" in classes:
+    for container in soup.select(selectors["container"]):
+        if skip_classes.intersection(container.get("class") or []):
             continue
 
-        title_link = (
-            container.select_one("h2 a")
-            or container.select_one("h3 a")
-            or container.select_one(".woocommerce-loop-product__title a")
-            or container.select_one("a.woocommerce-LoopProduct-link")
-            or container.select_one("a.wd-product-img-link")
-            or container.select_one('a[href*="/producto/"]')
-        )
-        if not title_link:
-            # último recurso: primer <a> con href que parezca ficha de producto
-            title_link = container.select_one("a[href]")
+        title_link = _first_match(container, selectors["link"])
         if not title_link or not title_link.get("href"):
             continue
 
@@ -255,18 +313,14 @@ def parse_products(html: str, source_url: str) -> List[dict]:
 
         title = title_link.get_text(strip=True)
         if not title:
-            title_el = container.select_one(
-                ".wd-entities-title, .woocommerce-loop-product__title, h2, h3"
-            )
+            title_el = _first_match(container, selectors["title"])
             if title_el:
                 title = title_el.get_text(strip=True)
         if not title:
             title = title_link.get("aria-label") or "(sin título)"
 
-        price_el = container.select_one(".price")
+        price_el = _first_match(container, selectors["price"])
         price = clean_price(price_el.get_text(" ", strip=True)) if price_el else ""
-
-        image = extract_image(container, source_url)
 
         seen_urls.add(product_url)
         products.append(
@@ -274,14 +328,15 @@ def parse_products(html: str, source_url: str) -> List[dict]:
                 "product_url": product_url,
                 "title": title,
                 "price": price,
-                "image": image,
+                "image": extract_image(container, source_url),
             }
         )
 
     return products
 
 
-def find_page_urls(html: str, source_url: str, max_pages: int) -> List[str]:
+def find_page_urls(html: str, source_url: str, max_pages: int,
+                   pagination_selector: str = DEFAULT_SELECTORS["pagination"]) -> List[str]:
     """Devuelve las URLs de las páginas 2..N de una categoría paginada.
 
     Se lee el paginador de WooCommerce para saber cuántas páginas hay y se
@@ -293,7 +348,7 @@ def find_page_urls(html: str, source_url: str, max_pages: int) -> List[str]:
 
     soup = BeautifulSoup(html, "html.parser")
     last = 1
-    for a in soup.select(".woocommerce-pagination a, nav.pagination a, .page-numbers a"):
+    for a in soup.select(pagination_selector):
         text = a.get_text(strip=True)
         if text.isdigit():
             last = max(last, int(text))
@@ -388,6 +443,131 @@ def send_telegram(bot_token: str, chat_id: str, product: dict, categoria: str) -
 
 
 # --------------------------------------------------------------------------- #
+# Diagnóstico de tiendas nuevas
+# --------------------------------------------------------------------------- #
+
+PLATAFORMAS = [
+    ("WooCommerce", ["woocommerce", "wp-content/plugins/woocommerce", "wc-block"]),
+    ("Shopify", ["cdn.shopify.com", "shopify-features", "/collections/"]),
+    ("PrestaShop", ["prestashop", "/modules/ps_"]),
+    ("Magento", ["magento", "mage/cookies", "static/version"]),
+]
+
+
+def detectar_plataforma(html: str) -> str:
+    bajo = html.lower()
+    for nombre, pistas in PLATAFORMAS:
+        if any(pista in bajo for pista in pistas):
+            return nombre
+    return "desconocida"
+
+
+def sugerir_contenedores(soup) -> List[str]:
+    """Busca a ojo qué elemento repetido podría ser la ficha de producto.
+
+    Estrategia: localizar los textos que parecen un precio, subir por sus
+    ancestros anotando la "firma" de clases, y quedarse solo con las firmas
+    que de verdad parecen una ficha: deben repetirse en la página (una por
+    producto) y contener un enlace. Así se descartan tanto el propio elemento
+    del precio como el contenedor que envuelve a toda la parrilla.
+    """
+    candidatas = set()
+    for nodo in soup.find_all(string=re.compile(r"\d+[.,]\d{2}\s*€")):
+        ancestro = nodo.parent
+        for _ in range(4):
+            if ancestro is None or ancestro.name in ("body", "html"):
+                break
+            clases = [c for c in (ancestro.get("class") or []) if not c.isdigit()]
+            if clases:
+                candidatas.add("." + ".".join(clases[:3]))
+            ancestro = ancestro.parent
+
+    resultados = []
+    for firma in candidatas:
+        try:
+            elementos = soup.select(firma)
+        except Exception:
+            continue
+        if len(elementos) < 2:
+            continue  # envoltorio de la parrilla, no una ficha
+        con_enlace = sum(1 for e in elementos if e.select_one("a[href]"))
+        if con_enlace < len(elementos) * 0.8:
+            continue  # el precio suelto y similares: no llevan enlace
+        resultados.append((firma, len(elementos)))
+
+    resultados.sort(key=lambda par: (-par[1], par[0].count(".")))
+    return [f"{firma}  ({veces} fichas)" for firma, veces in resultados[:5]]
+
+
+def diagnosticar(url: str, selectors: dict) -> int:
+    """Analiza una categoría y dice si el scraper la entiende tal cual."""
+    print(f"\n🔍 Analizando {url}\n")
+
+    try:
+        resp = requests.get(
+            url,
+            headers={"User-Agent": USER_AGENT, "Accept-Language": "es-ES,es;q=0.9"},
+            timeout=REQUEST_TIMEOUT,
+        )
+    except requests.RequestException as e:
+        print(f"❌ No se pudo descargar: {e}")
+        return 1
+
+    print(f"   HTTP {resp.status_code}   →  {resp.url}")
+    if resp.status_code != 200:
+        print("❌ La tienda no devolvió una página válida.")
+        return 1
+
+    html = resp.text
+    soup = BeautifulSoup(html, "html.parser")
+    print(f"   Plataforma detectada: {detectar_plataforma(html)}")
+
+    contador = soup.select_one(".woocommerce-result-count, .product-count, .toolbar-amount")
+    if contador:
+        print(f"   Contador de la tienda: {contador.get_text(' ', strip=True)}")
+
+    productos = parse_products(html, str(resp.url), selectors)
+    paginas = find_page_urls(html, str(resp.url), 999, selectors["pagination"])
+    print(f"   Contenedores encontrados: {len(soup.select(selectors['container']))}")
+    print(f"   Productos reconocidos:    {len(productos)}")
+    print(f"   Páginas detectadas:       {len(paginas) + 1}")
+
+    if not productos:
+        print("\n❌ El scraper NO entiende esta tienda con los selectores actuales.")
+        sugerencias = sugerir_contenedores(soup)
+        if sugerencias:
+            print("\n   Posibles contenedores de producto (por frecuencia):")
+            for sug in sugerencias:
+                print(f"     {sug}")
+            print('\n   Prueba a poner uno en el bloque "selectors" de la config:')
+            print('     "selectors": { "container": ".loquesea" }')
+        else:
+            print("   No se han encontrado ni precios en la página: puede que la")
+            print("   tienda cargue el catálogo por JavaScript, y entonces habría")
+            print("   que atacar su API en vez del HTML.")
+        return 1
+
+    print("\n   Muestra de lo que se detectaría:\n")
+    for prod in productos[:3]:
+        print(f"     • {prod['title']}")
+        print(f"       precio: {prod['price'] or '(no detectado)'}")
+        print(f"       imagen: {'sí' if prod['image'] else 'NO detectada'}")
+        print(f"       enlace: {prod['product_url']}")
+
+    sin_precio = sum(1 for p in productos if not p["price"])
+    sin_imagen = sum(1 for p in productos if not p["image"])
+    print()
+    if sin_precio:
+        print(f"   ⚠️  {sin_precio}/{len(productos)} productos sin precio detectado.")
+    if sin_imagen:
+        print(f"   ⚠️  {sin_imagen}/{len(productos)} productos sin imagen (llegarán como texto).")
+    if not sin_precio and not sin_imagen:
+        print("   ✅ Título, precio e imagen detectados en todos los productos.")
+    print(f"\n✅ Esta URL se puede añadir tal cual a una config.\n")
+    return 0
+
+
+# --------------------------------------------------------------------------- #
 # Ejecución principal
 # --------------------------------------------------------------------------- #
 
@@ -412,7 +592,10 @@ def run(cfg: dict, force_seed: bool = False) -> int:
     total_new = 0
     errores = 0
 
-    for source_url in cfg["urls"]:
+    for fuente in cfg["urls"]:
+        source_url = fuente["url"]
+        selectors = fuente["selectors"]
+
         try:
             html = fetch_html(source_url)
         except requests.RequestException as e:
@@ -421,7 +604,7 @@ def run(cfg: dict, force_seed: bool = False) -> int:
             continue
 
         pages = [(source_url, html)]
-        for page_url in find_page_urls(html, source_url, max_pages):
+        for page_url in find_page_urls(html, source_url, max_pages, selectors["pagination"]):
             time.sleep(random.uniform(*DELAY_BETWEEN_URLS))
             try:
                 pages.append((page_url, fetch_html(page_url)))
@@ -430,7 +613,7 @@ def run(cfg: dict, force_seed: bool = False) -> int:
                 errores += 1
 
         for page_url, page_html in pages:
-            products = parse_products(page_html, page_url)
+            products = parse_products(page_html, page_url, selectors)
             logging.info("%s -> %d productos encontrados", page_url, len(products))
 
             if not products:
@@ -485,7 +668,18 @@ def run(cfg: dict, force_seed: bool = False) -> int:
 
 def main():
     parser = argparse.ArgumentParser(description="TCG Watcher - scraping de categorías WooCommerce")
-    parser.add_argument("config", help="Ruta al fichero de configuración JSON de la categoría")
+    parser.add_argument(
+        "config",
+        nargs="?",
+        help="Ruta al fichero de configuración JSON de la categoría",
+    )
+    parser.add_argument(
+        "--check",
+        metavar="URL",
+        help="Analiza una URL de categoría y dice si el scraper la entiende, "
+             "sin tocar la base de datos ni enviar nada. Úsalo antes de añadir "
+             "una tienda nueva a una config.",
+    )
     parser.add_argument(
         "--seed",
         action="store_true",
@@ -493,6 +687,17 @@ def main():
              "Úsalo al añadir tiendas o URLs nuevas a una categoría ya en marcha.",
     )
     args = parser.parse_args()
+
+    if args.check:
+        # Si se pasa también una config, se usan SUS selectores, para poder
+        # comprobar los ajustes de una tienda concreta antes de fiarse de ellos.
+        selectors = DEFAULT_SELECTORS
+        if args.config:
+            selectors = load_config(args.config)["selectors"]
+        sys.exit(diagnosticar(args.check, selectors))
+
+    if not args.config:
+        parser.error("Indica un fichero de configuración, o usa --check URL para analizar una tienda.")
 
     cfg = load_config(args.config)
     setup_logging(cfg["log_path"])
