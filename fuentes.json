@@ -1,28 +1,27 @@
 {
-  "_ayuda": "Cada entrada de 'fuentes' es una URL vigilada. Mínimo: 'url' y 'categoria'. La tienda se deduce del dominio; para forzarla, usa 'nombres_tienda' (por dominio) o 'tienda' (en la entrada). Ejecuta 'python3 scraper.py --listar' para ver esto explicado.",
+  "_ayuda": "Cada entrada de 'fuentes' es una URL vigilada. Mínimo: 'url' y 'categoria'. La URL debe ir filtrada por stock. La tienda se deduce del dominio; para forzarla usa 'nombres_tienda' o 'tienda'. Ejecuta 'python3 scraper.py --listar'.",
+
   "telegram": {
     "bot_token": "${TELEGRAM_BOT_TOKEN}",
     "chat_id": "${TELEGRAM_CHAT_ID}"
   },
+
   "nombres_tienda": {
     "flashstore.es": "Flash Store",
     "pokemillon.com": "Pokemillón"
   },
-  "max_pages": 3,
-  "seed_max_pages": 70,
+
+  "db_path": "estado.db",
+  "max_pages": 20,
+
   "fuentes": [
     {
       "url": "https://flashstore.es/categoria/one-piece/?stock_status=instock",
       "categoria": "One Piece"
     },
     {
-      "url": "https://flashstore.es/categoria/pokemon/?stock_status=instock",
-      "categoria": "Pokémon"
-    },
-    {
       "url": "https://www.pokemillon.com/collections/one-piece?filter.v.availability=1",
-      "categoria": "One Piece",
-      "solo_disponibles": true
+      "categoria": "One Piece"
     }
   ]
 }

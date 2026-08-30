@@ -9,5 +9,9 @@ __pycache__/
 # Logs (se regeneran en cada ejecución)
 *.log
 
+# Base de datos binaria: en el repo se versiona estado.sql (texto), porque git
+# guarda solo las líneas que cambian en vez del fichero entero en cada commit.
+estado.db
+
 # Copias de seguridad
 *.bak

@@ -1,0 +1,36 @@
+name: Comandos de Telegram
+
+on:
+  schedule:
+    # Cada 5 minutos, el mínimo que permite GitHub. No es tiempo real:
+    # una respuesta puede tardar entre 5 y 20 minutos en llegar.
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: tcg-watcher
+  cancel-in-progress: false
+
+jobs:
+  atender:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -r requirements.txt
+
+      - name: Responder a los comandos pendientes
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python scraper.py --comandos
+
+      - name: Guardar el estado
+        if: always()
+        run: bash .github/guardar_estado.sh "Actualiza estado (comandos)"
