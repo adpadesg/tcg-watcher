@@ -180,5 +180,13 @@ Además, el Mac tiene que estar encendido y despierto.
   fallback a mensaje de texto.
 - Paginación: se lee el paginador de WooCommerce y se recorren las páginas
   `/page/N/` hasta el límite de `max_pages`.
+- **Fallos ruidosos**: el scraper termina con código 1 (y el workflow se pone en
+  rojo, con aviso por correo de GitHub) si una URL no se puede descargar, si una
+  página devuelve 0 productos —señal de que la tienda cambió su HTML— o si
+  Telegram rechaza un envío. Un vigilante que falla en silencio es peor que no
+  tenerlo: dejarías de recibir avisos sin enterarte.
+- **Un aviso no se pierde**: el producto se marca como visto *después* de que
+  Telegram confirme el envío, así que si falla se reintenta en la pasada
+  siguiente en vez de descartarse para siempre.
 - Se guarda un `seen_<categoria>.db` (SQLite) por categoría.
 - Hay una espera aleatoria de 2-5 s entre peticiones para no saturar la web.

@@ -349,7 +349,8 @@ def download_image(url: str) -> Optional[bytes]:
     return resp.content
 
 
-def send_telegram(bot_token: str, chat_id: str, product: dict, categoria: str):
+def send_telegram(bot_token: str, chat_id: str, product: dict, categoria: str) -> bool:
+    """Envía el aviso. Devuelve True solo si Telegram lo ha aceptado."""
     caption = build_caption(product, categoria)
     api = f"https://api.telegram.org/bot{bot_token}"
 
@@ -366,7 +367,7 @@ def send_telegram(bot_token: str, chat_id: str, product: dict, categoria: str):
                     timeout=REQUEST_TIMEOUT,
                 )
                 if r.status_code == 200:
-                    return
+                    return True
                 logging.warning("sendPhoto falló (%s), se envía como texto", r.text[:200])
             except requests.RequestException as e:
                 logging.warning("Excepción en sendPhoto (%s), se envía como texto", e)
@@ -379,15 +380,26 @@ def send_telegram(bot_token: str, chat_id: str, product: dict, categoria: str):
         )
         if r.status_code != 200:
             logging.error("Error enviando a Telegram: %s", r.text[:300])
+            return False
+        return True
     except requests.RequestException as e:
         logging.error("Excepción enviando a Telegram: %s", e)
+        return False
 
 
 # --------------------------------------------------------------------------- #
 # Ejecución principal
 # --------------------------------------------------------------------------- #
 
-def run(cfg: dict, force_seed: bool = False):
+def run(cfg: dict, force_seed: bool = False) -> int:
+    """Ejecuta una pasada. Devuelve el número de fallos (0 = todo bien).
+
+    Se devuelve un contador en vez de tragarse los errores porque un vigilante
+    que falla en silencio es peor que uno que no existe: si la tienda deja de
+    responder o Telegram rechaza los envíos, dejarías de recibir avisos sin
+    enterarte. Con esto, la ejecución de GitHub Actions se pone en rojo y te
+    llega el aviso de fallo.
+    """
     conn = init_db(cfg["db_path"])
     seed_mode = force_seed or is_first_run(conn)
     if seed_mode:
@@ -398,12 +410,14 @@ def run(cfg: dict, force_seed: bool = False):
 
     max_pages = cfg["seed_max_pages"] if seed_mode else cfg["max_pages"]
     total_new = 0
+    errores = 0
 
     for source_url in cfg["urls"]:
         try:
             html = fetch_html(source_url)
         except requests.RequestException as e:
             logging.error("No se pudo descargar %s: %s", source_url, e)
+            errores += 1
             continue
 
         pages = [(source_url, html)]
@@ -413,14 +427,41 @@ def run(cfg: dict, force_seed: bool = False):
                 pages.append((page_url, fetch_html(page_url)))
             except requests.RequestException as e:
                 logging.error("No se pudo descargar %s: %s", page_url, e)
+                errores += 1
 
         for page_url, page_html in pages:
             products = parse_products(page_html, page_url)
             logging.info("%s -> %d productos encontrados", page_url, len(products))
 
+            if not products:
+                # La página se descargó pero no se reconoció ningún producto:
+                # señal de que la tienda ha cambiado de plantilla.
+                logging.error(
+                    "0 productos en %s: puede que la tienda haya cambiado su HTML "
+                    "y haya que revisar parse_products().",
+                    page_url,
+                )
+                errores += 1
+
             for product in products:
                 if already_seen(conn, product["product_url"]):
                     continue
+
+                if not seed_mode:
+                    enviado = send_telegram(
+                        cfg["telegram"]["bot_token"],
+                        cfg["telegram"]["chat_id"],
+                        product,
+                        cfg["categoria"],
+                    )
+                    if not enviado:
+                        # No se marca como visto: así se reintenta en la
+                        # siguiente pasada en vez de perder el aviso.
+                        logging.error("Aviso NO enviado, se reintentará: %s", product["title"])
+                        errores += 1
+                        continue
+                    logging.info("Nuevo producto notificado: %s", product["title"])
+                    total_new += 1
 
                 mark_seen(
                     conn,
@@ -430,22 +471,16 @@ def run(cfg: dict, force_seed: bool = False):
                     page_url,
                 )
 
-                if not seed_mode:
-                    send_telegram(
-                        cfg["telegram"]["bot_token"],
-                        cfg["telegram"]["chat_id"],
-                        product,
-                        cfg["categoria"],
-                    )
-                    logging.info("Nuevo producto notificado: %s", product["title"])
-                    total_new += 1
-
         time.sleep(random.uniform(*DELAY_BETWEEN_URLS))
 
     if seed_mode:
         logging.info("Catálogo guardado en la base de datos. A partir de la próxima ejecución llegarán notificaciones.")
     else:
         logging.info("Ejecución completada. Productos nuevos notificados: %d", total_new)
+
+    if errores:
+        logging.error("La pasada terminó con %d error(es).", errores)
+    return errores
 
 
 def main():
@@ -461,7 +496,7 @@ def main():
 
     cfg = load_config(args.config)
     setup_logging(cfg["log_path"])
-    run(cfg, force_seed=args.seed)
+    sys.exit(1 if run(cfg, force_seed=args.seed) else 0)
 
 
 if __name__ == "__main__":
