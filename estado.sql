@@ -557,7 +557,7 @@ CREATE TABLE estado (
             clave TEXT PRIMARY KEY,
             valor TEXT
         );
-INSERT INTO "estado" VALUES('telegram_offset','178709576');
+INSERT INTO "estado" VALUES('telegram_offset','178709579');
 CREATE TABLE eventos (
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
             fecha       TEXT NOT NULL,
@@ -571,8 +571,8 @@ CREATE TABLE eventos (
         );
 INSERT INTO "eventos" VALUES(1,'2026-08-30T20:11:38+00:00','nuevo','Flash Store','One Piece','One Piece OP-17 4th Anniversary CHN','144,90 €','Chino','https://flashstore.es/producto/one-piece-op-17-4th-anniversary-chn/');
 INSERT INTO "eventos" VALUES(3,'2026-08-30T20:11:46+00:00','repuesto','Pokemillón','One Piece','One Piece Caja Sobres PRB-02 The Best vol.2 Premium Collection','84,90 €','Japonés','https://www.pokemillon.com/products/one-piece-prb-02-box?variant=53440396656963');
-DELETE FROM "sqlite_sequence";
-INSERT INTO "sqlite_sequence" VALUES('eventos',4);
 CREATE INDEX idx_eventos_fecha ON eventos(fecha);
 CREATE INDEX idx_articulos_fuente ON articulos(fuente_url);
+DELETE FROM "sqlite_sequence";
+INSERT INTO "sqlite_sequence" VALUES('eventos',4);
 COMMIT;
