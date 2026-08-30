@@ -478,7 +478,7 @@ CREATE TABLE estado (
             clave TEXT PRIMARY KEY,
             valor TEXT
         );
-INSERT INTO "estado" VALUES('telegram_offset','178709572');
+INSERT INTO "estado" VALUES('telegram_offset','178709576');
 CREATE TABLE eventos (
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
             fecha       TEXT NOT NULL,
