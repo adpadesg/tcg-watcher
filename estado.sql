@@ -561,7 +561,7 @@ CREATE TABLE estado (
             clave TEXT PRIMARY KEY,
             valor TEXT
         );
-INSERT INTO "estado" VALUES('telegram_offset','178709580');
+INSERT INTO "estado" VALUES('telegram_offset','178709581');
 INSERT INTO "estado" VALUES('hubo_errores','0');
 INSERT INTO "estado" VALUES('ultimo_latido','2026-09-02T10:43:27+00:00');
 INSERT INTO "estado" VALUES('ultimo_aviso_error','');
